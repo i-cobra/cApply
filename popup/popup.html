@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cApply</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>cApply</h1>
+    <p class="subtitle">Tailor your resume with ChatGPT</p>
+  </header>
+
+  <main>
+    <section class="field">
+      <div class="field-header">
+        <label for="resume">Your resume</label>
+        <button type="button" id="loadResumeFile" class="link-btn">Upload file</button>
+        <input type="file" id="resumeFile" accept=".txt,.md,.pdf" hidden />
+      </div>
+      <textarea id="resume" rows="6" placeholder="Paste your resume here, or upload a .txt, .md, or .pdf file…"></textarea>
+    </section>
+
+    <section class="field">
+      <div class="field-header">
+        <label for="jobDescription">Job description</label>
+        <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
+      </div>
+      <textarea id="jobDescription" rows="6" placeholder="Paste the job posting here…"></textarea>
+    </section>
+
+    <details class="options">
+      <summary>Options</summary>
+      <div class="options-grid">
+        <label>
+          Tone
+          <select id="tone">
+            <option value="professional">Professional</option>
+            <option value="concise">Concise</option>
+            <option value="executive">Executive</option>
+            <option value="friendly">Friendly</option>
+          </select>
+        </label>
+        <label>
+          Output
+          <select id="outputFormat">
+            <option value="full resume">Full resume</option>
+            <option value="resume bullets only">Bullets only</option>
+            <option value="cover letter + resume">Cover letter + resume</option>
+          </select>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="autoSend" checked />
+          Auto-send to ChatGPT
+        </label>
+      </div>
+      <label class="full-width">
+        Extra instructions (optional)
+        <input type="text" id="extraInstructions" placeholder="e.g. Keep to one page, emphasize Python experience" />
+      </label>
+    </details>
+
+    <button type="button" id="tailorBtn" class="primary">
+      Tailor with ChatGPT
+    </button>
+
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <footer>
+    <button type="button" id="saveResume" class="ghost-btn">Save resume locally</button>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
