@@ -1,10 +1,11 @@
 import { readResumeFile } from "../lib/pdf-extract.js";
-import { computeAtsScore, scoreTier } from "../lib/ats-score.js";
+import { scoreTier } from "../lib/ats-score.js";
 import { emptyResume, parseResumeText, serializeResume } from "../lib/resume-structure.js";
 import {
   addTailorHistoryEntry,
   clearTailorHistory,
   formatHistoryDate,
+  inferJobRole,
   loadTailorHistory,
   removeTailorHistoryEntry,
 } from "../lib/tailor-history.js";
@@ -14,8 +15,16 @@ import {
   loadJobContext,
   saveJobContext,
 } from "../lib/job-context.js";
-import { downloadResumePdf } from "../lib/resume-pdf.js";
-import { parseTailorResponse } from "../lib/tailor-response.js";
+import {
+  buildResumeDownloadFilename,
+  downloadResumePdf,
+  previewResumePdf,
+} from "../lib/resume-pdf.js";
+import { parseTailorResponse, normalizeAtsScoreResult } from "../lib/tailor-response.js";
+import {
+  analyzeJobCoreSkills,
+  ensureCoreSkillsInTailoredResume,
+} from "../lib/job-core-skills.js";
 import { createResumeEditor } from "./resume-editor.js";
 
 const PROFILE_KEY = "capply_profile_resume";
@@ -49,13 +58,8 @@ const els = {
     analysis: document.getElementById("panel-analysis"),
   },
   profileResumeEditor: document.getElementById("profileResumeEditor"),
-  profileSourceText: document.getElementById("profileSourceText"),
-  profileFillInstructions: document.getElementById("profileFillInstructions"),
   fillProfileBtn: document.getElementById("fillProfileBtn"),
-  profileSourceSummary: document.getElementById("profileSourceSummary"),
   tailoredResumeSection: document.getElementById("tailoredResumeSection"),
-  tailoredChangesWrap: document.getElementById("tailoredChangesWrap"),
-  tailoredChangesList: document.getElementById("tailoredChangesList"),
   tailoredResumeEditor: document.getElementById("tailoredResumeEditor"),
   jobDescription: document.getElementById("jobDescription"),
   companyName: document.getElementById("companyName"),
@@ -65,13 +69,15 @@ const els = {
   autoSend: document.getElementById("autoSend"),
   extraInstructions: document.getElementById("extraInstructions"),
   tailorBtn: document.getElementById("tailorBtn"),
-  retailorBtn: document.getElementById("retailorBtn"),
+  tailorBtnLabel: document.querySelector("#tailorBtn .tailor-btn-label"),
+  applicationActionsSecondary: document.getElementById("applicationActionsSecondary"),
+  downloadResumeBtn: document.getElementById("downloadResumeBtn"),
+  previewResumeBtn: document.getElementById("previewResumeBtn"),
+  newApplicationBtn: document.getElementById("newApplicationBtn"),
   grabFromPage: document.getElementById("grabFromPage"),
-  goToProfile: document.getElementById("goToProfile"),
   clearProfile: document.getElementById("clearProfile"),
   profileFile: document.getElementById("profileFile"),
   saveProfile: document.getElementById("saveProfile"),
-  saveTailoredResume: document.getElementById("saveTailoredResume"),
   profileStatus: document.getElementById("profileStatus"),
   status: document.getElementById("status"),
   atsScoreSection: document.getElementById("atsScoreSection"),
@@ -84,16 +90,16 @@ const els = {
   atsMissingDetails: document.getElementById("atsMissingDetails"),
   historyList: document.getElementById("historyList"),
   historyEmpty: document.getElementById("historyEmpty"),
+  historySearch: document.getElementById("historySearch"),
+  historyCompanySearch: document.getElementById("historyCompanySearch"),
+  historyPositionSearch: document.getElementById("historyPositionSearch"),
   clearHistory: document.getElementById("clearHistory"),
 };
 
-const profileEditor = createResumeEditor(els.profileResumeEditor, {
-  onChange: updateProfileSourceSummary,
-});
+const profileEditor = createResumeEditor(els.profileResumeEditor);
 
 const tailoredEditor = createResumeEditor(els.tailoredResumeEditor, {
   onChange: () => {
-    latestAtsFromAi = null;
     persistJobContext();
     updateAtsScore();
     updateApplicationActionButton();
@@ -115,6 +121,9 @@ let activeJobContextKey = null;
 /** @type {boolean} */
 let tailorInProgress = false;
 
+/** @type {boolean} */
+let tailoredResumeReady = false;
+
 /**
  * Browser tab + storage key captured when tailoring starts so tab switches
  * during ChatGPT do not wipe the form or save results to the wrong tab.
@@ -127,56 +136,45 @@ init();
 async function init() {
   await loadProfileResume();
 
+  activeJobContextKey = getJobContextKey();
+  await migrateLegacyApplicationState(activeJobContextKey);
+  applyApplicationState(await loadJobContext(activeJobContextKey));
+
   const tab = await getActiveBrowserTab();
-  if (tab) {
-    await refreshJobContextForTab(tab.tabId, tab.url, {
-      saveCurrent: false,
-      reload: true,
-    });
-  }
+  if (tab) activeBrowserTabId = tab.tabId;
 
   els.mainTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveTab(tab.dataset.tab));
   });
 
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message.type !== "JOB_TAB_CHANGED") return;
-    if (typeof message.tabId !== "number") return;
-
-    refreshJobContextForTab(message.tabId, message.url || "", {
-      saveCurrent: true,
-      reload: message.reason === "activated",
-    });
-  });
-
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
-      refreshJobContext({ saveCurrent: true, reload: false });
+      getActiveBrowserTab().then((tab) => {
+        if (tab) activeBrowserTabId = tab.tabId;
+      });
+      persistJobContext();
     }
   });
 
-  els.tailorBtn.addEventListener("click", onApplicationActionClick);
-  els.retailorBtn.addEventListener("click", onTailor);
+  els.tailorBtn.addEventListener("click", onTailor);
+  els.newApplicationBtn.addEventListener("click", onNewApplication);
+  els.downloadResumeBtn.addEventListener("click", onDownloadTailoredResume);
+  els.previewResumeBtn.addEventListener("click", onPreviewTailoredResume);
   els.grabFromPage.addEventListener("click", onGrabFromPage);
-  els.goToProfile.addEventListener("click", () => setActiveTab("profile"));
   els.clearProfile.addEventListener("click", onClearProfile);
   els.profileFile.addEventListener("change", onProfileFile);
   els.saveProfile.addEventListener("click", onSaveProfile);
   els.fillProfileBtn.addEventListener("click", onFillProfile);
-  els.saveTailoredResume.addEventListener("click", onSaveTailoredResume);
   els.jobDescription.addEventListener("input", onApplicationInput);
   els.companyName.addEventListener("input", scheduleJobContextSave);
   els.jobUrl.addEventListener("input", scheduleJobContextSave);
   els.clearHistory.addEventListener("click", onClearHistory);
   els.historyList.addEventListener("click", onHistoryListClick);
+  els.historyCompanySearch.addEventListener("input", () => renderHistory());
+  els.historyPositionSearch.addEventListener("input", () => renderHistory());
 
-  updateProfileSourceSummary();
   updateApplicationActionButton();
   await renderHistory();
-}
-
-function getStoredChanges() {
-  return latestTailorChanges;
 }
 
 async function loadProfileResume() {
@@ -245,7 +243,8 @@ async function migrateLegacyApplicationState(contextKey) {
 function collectApplicationState() {
   const structured = tailoredEditor.getStructured();
   const resumeText = tailoredEditor.getText();
-  const hasTailored = !els.tailoredResumeSection.hidden && Boolean(resumeText.trim());
+  const hasTailored =
+    hasResumeContent(structured) || Boolean(resumeText.trim());
 
   return {
     jobDescription: els.jobDescription.value,
@@ -276,8 +275,8 @@ function applyApplicationState(state) {
 
   if (state?.resumeText?.trim()) {
     tailoredEditor.setText(state.resumeText, { silent: true });
-    renderTailorChanges(latestTailorChanges);
     els.tailoredResumeSection.hidden = false;
+    tailoredResumeReady = hasResumeContent(tailoredEditor.getStructured());
     updateAtsScore();
     updateApplicationActionButton();
     return;
@@ -290,48 +289,51 @@ function applyApplicationState(state) {
 function resetTailoredApplicationUi() {
   latestTailorChanges = [];
   latestAtsFromAi = null;
+  tailoredResumeReady = false;
   tailoredEditor.setStructured(emptyResume(), { silent: true });
-  renderTailorChanges([]);
   els.tailoredResumeSection.hidden = true;
   els.atsScoreSection.hidden = true;
+  els.applicationActionsSecondary.hidden = true;
   updateApplicationActionButton();
 }
 
 function hasTailoredResume() {
-  const text = tailoredEditor.getText().trim();
-  return !els.tailoredResumeSection.hidden && Boolean(text);
+  return tailoredResumeReady && hasResumeContent(tailoredEditor.getStructured());
+}
+
+function setTailorBtnLabel(text) {
+  if (els.tailorBtnLabel) els.tailorBtnLabel.textContent = text;
+}
+
+function getTailorActionLabel() {
+  if (tailorInProgress) return "Tailoring…";
+  return hasTailoredResume()
+    ? els.tailorBtn.dataset.retailorLabel || "Re-tailor"
+    : els.tailorBtn.dataset.tailorLabel || "Tailor";
 }
 
 function updateApplicationActionButton() {
-  const tailorLabel = els.tailorBtn.dataset.tailorLabel || "Tailor";
-  const downloadLabel = els.tailorBtn.dataset.downloadLabel || "Download resume";
-  const showDownload = hasTailoredResume() && !tailorInProgress;
+  if (tailoredResumeReady && !hasResumeContent(tailoredEditor.getStructured())) {
+    tailoredResumeReady = false;
+  }
 
-  els.retailorBtn.hidden = !showDownload;
+  const showSecondary = hasTailoredResume() && !tailorInProgress;
 
-  if (showDownload) {
-    els.tailorBtn.dataset.mode = "download";
-    els.tailorBtn.textContent = downloadLabel;
-    els.tailorBtn.disabled = false;
+  els.applicationActionsSecondary.hidden = !showSecondary;
+  setTailorBtnLabel(getTailorActionLabel());
+  els.tailorBtn.disabled = tailorInProgress;
+  els.downloadResumeBtn.disabled = tailorInProgress;
+  els.previewResumeBtn.disabled = tailorInProgress;
+
+  if (tailorInProgress) {
+    els.tailorBtn.classList.add("busy");
+    els.tailorBtn.setAttribute("aria-busy", "true");
+  } else {
     els.tailorBtn.classList.remove("busy");
     els.tailorBtn.setAttribute("aria-busy", "false");
-    return;
   }
 
-  els.tailorBtn.dataset.mode = "tailor";
-  els.tailorBtn.textContent = tailorLabel;
-  els.tailorBtn.disabled = false;
-  els.tailorBtn.classList.remove("busy");
-  els.tailorBtn.setAttribute("aria-busy", "false");
-}
-
-function onApplicationActionClick() {
-  if (els.tailorBtn.dataset.mode === "download") {
-    onDownloadTailoredResume();
-    return;
-  }
-
-  onTailor();
+  updateAtsScore();
 }
 
 function onDownloadTailoredResume() {
@@ -345,99 +347,95 @@ function onDownloadTailoredResume() {
   }
 
   const name = structured.contact.name?.trim() || "resume";
-  const company = els.companyName.value.trim();
-  const safeName = name.replace(/[<>:"/\\|?*]/g, "_");
-  const filename = company
-    ? `${safeName} - ${company.replace(/[<>:"/\\|?*]/g, "_")}.pdf`
-    : `${safeName}.pdf`;
+  const role = inferJobRole(els.jobDescription.value);
+  const filename = buildResumeDownloadFilename(name, role);
 
   downloadResumePdf(structured, filename);
   setStatus("Resume downloaded.", "success");
 }
 
+async function onPreviewTailoredResume() {
+  const structured = tailoredEditor.getStructured();
+  const resumeText = tailoredEditor.getText().trim();
+
+  if (!resumeText) {
+    setStatus("Nothing to preview.", "error");
+    updateApplicationActionButton();
+    return;
+  }
+
+  const title = structured.contact.name?.trim() || "Resume";
+
+  try {
+    els.previewResumeBtn.disabled = true;
+    await previewResumePdf(structured, title);
+    setStatus("Resume preview opened in a new tab.", "success");
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    updateApplicationActionButton();
+  }
+}
+
+async function onNewApplication() {
+  if (tailorInProgress) {
+    setStatus("Wait for tailoring to finish.", "error");
+    return;
+  }
+
+  els.jobDescription.value = "";
+  els.companyName.value = "";
+  els.jobUrl.value = "";
+  resetTailoredApplicationUi();
+  setStatus("");
+
+  if (!activeJobContextKey) activeJobContextKey = getJobContextKey();
+  await saveJobContext(activeJobContextKey, {
+    jobDescription: "",
+    companyName: "",
+    jobUrl: "",
+    resumeText: "",
+    structured: null,
+    changes: [],
+    atsScore: null,
+  });
+
+  const tab = await getActiveBrowserTab();
+  if (
+    tab?.url &&
+    !tab.url.startsWith("chrome") &&
+    !tab.url.startsWith("edge") &&
+    !tab.url.startsWith("about:")
+  ) {
+    els.jobUrl.value = tab.url;
+    await persistJobContext();
+  }
+
+  els.jobDescription.focus();
+}
+
 /** @type {number | null} */
 let activeBrowserTabId = null;
-
-/** @type {Promise<void>} */
-let contextRefreshChain = Promise.resolve();
-
-/**
- * @param {() => Promise<void>} task
- */
-function enqueueContextRefresh(task) {
-  contextRefreshChain = contextRefreshChain.then(task).catch(() => {});
-  return contextRefreshChain;
-}
 
 async function flushJobContextSave() {
   window.clearTimeout(jobContextTimer);
   window.clearTimeout(atsUpdateTimer);
 
-  if (!activeJobContextKey) return;
+  if (!activeJobContextKey) activeJobContextKey = getJobContextKey();
   await saveJobContext(activeJobContextKey, collectApplicationState());
 }
 
-/**
- * @param {number} tabId
- * @param {string} url
- * @param {{ saveCurrent?: boolean, reload?: boolean }} [options]
- */
-async function refreshJobContextForTab(
-  tabId,
-  url,
-  { saveCurrent = true, reload = false } = {}
-) {
-  return enqueueContextRefresh(async () => {
-    if (tailorInProgress) {
-      if (saveCurrent && activeJobContextKey) {
-        await flushJobContextSave();
-      }
-      return;
-    }
+async function persistJobContext(contextKey = activeJobContextKey) {
+  window.clearTimeout(jobContextTimer);
 
-    const previousTabId = activeBrowserTabId;
+  let key = contextKey || getJobContextKey();
+  if (!contextKey) {
+    const tab = await getActiveBrowserTab();
+    if (tab) activeBrowserTabId = tab.tabId;
+  }
+  activeJobContextKey = key;
 
-    if (saveCurrent && activeJobContextKey) {
-      await flushJobContextSave();
-    }
-
-    const activeTab = await getActiveBrowserTab();
-    if (!activeTab || activeTab.tabId !== tabId) {
-      return;
-    }
-
-    const nextKey = getJobContextKey(url || activeTab.url, tabId);
-    const switchedTab = previousTabId !== null && tabId !== previousTabId;
-
-    if (reload || switchedTab || previousTabId === null) {
-      activeJobContextKey = nextKey;
-      activeBrowserTabId = tabId;
-      await migrateLegacyApplicationState(nextKey);
-      const state = await loadJobContext(nextKey);
-      applyApplicationState(state);
-    }
-
-    const pageUrl = url || activeTab.url;
-    if (
-      pageUrl &&
-      !pageUrl.startsWith("chrome") &&
-      !els.jobUrl.value.trim()
-    ) {
-      els.jobUrl.value = pageUrl;
-      await persistJobContext();
-    }
-
-    if (els.tabPanels.application && !els.tabPanels.application.hidden) {
-      updateProfileSourceSummary();
-      updateAtsScore();
-    }
-  });
-}
-
-async function refreshJobContext({ saveCurrent = true, reload = false } = {}) {
-  const tab = await getActiveBrowserTab();
-  if (!tab) return;
-  await refreshJobContextForTab(tab.tabId, tab.url, { saveCurrent, reload });
+  await saveJobContext(key, collectApplicationState());
 }
 
 function scheduleJobContextSave() {
@@ -447,23 +445,8 @@ function scheduleJobContextSave() {
   }, 250);
 }
 
-async function persistJobContext(contextKey = activeJobContextKey) {
-  window.clearTimeout(jobContextTimer);
-
-  let key = contextKey;
-  if (!key) {
-    const tab = await getActiveBrowserTab();
-    if (!tab) return;
-    key = getJobContextKey(tab.url, tab.tabId);
-    activeJobContextKey = key;
-    activeBrowserTabId = tab.tabId;
-  }
-
-  await saveJobContext(key, collectApplicationState());
-}
-
 function onApplicationInput() {
-  if (latestAtsFromAi) {
+  if (!hasTailoredResume()) {
     latestAtsFromAi = null;
   }
   scheduleAtsScoreUpdate();
@@ -487,7 +470,6 @@ function setActiveTab(tabId) {
   });
 
   if (tabId === "application") {
-    updateProfileSourceSummary();
     updateAtsScore();
   }
 
@@ -510,48 +492,7 @@ function getProfileResumeText() {
   return profileEditor.getText();
 }
 
-function updateProfileSourceSummary() {
-  const text = getProfileResumeText().trim();
-  const structured = profileEditor.getStructured();
-  const name = structured.contact.name?.trim();
-
-  if (!text) {
-    els.profileSourceSummary.textContent =
-      "No profile resume yet. Add your basic resume in Profile.";
-    els.profileSourceSummary.classList.remove("ready");
-    return;
-  }
-
-  const roleCount = structured.experience.filter(
-    (job) =>
-      job.title?.trim() ||
-      job.company?.trim() ||
-      job.dates?.trim() ||
-      job.bullets?.some((b) => b.trim())
-  ).length;
-
-  const label = name || "Profile resume";
-  const roles = roleCount ? ` · ${roleCount} role${roleCount === 1 ? "" : "s"}` : "";
-  els.profileSourceSummary.textContent = `${label}${roles} — tailoring uses a copy only.`;
-  els.profileSourceSummary.classList.add("ready");
-}
-
-function getResumeForAtsScore() {
-  const tailoredText = tailoredEditor.getText().trim();
-  const usingTailored =
-    !els.tailoredResumeSection.hidden && Boolean(tailoredText);
-
-  return {
-    text: usingTailored ? tailoredText : getProfileResumeText(),
-    sourceLabel: usingTailored ? "Tailored resume" : "Profile resume",
-    usingTailored,
-  };
-}
-
 function scheduleAtsScoreUpdate() {
-  if (latestAtsFromAi) {
-    latestAtsFromAi = null;
-  }
   window.clearTimeout(atsUpdateTimer);
   atsUpdateTimer = window.setTimeout(updateAtsScore, 250);
 }
@@ -565,85 +506,63 @@ function renderAtsKeywordList(listEl, keywords) {
   }
 }
 
-function updateAtsScore() {
-  const jobDescription = els.jobDescription.value.trim();
-  const { text: resumeText, sourceLabel, usingTailored } = getResumeForAtsScore();
+function normalizeDisplayAtsScore(value) {
+  return normalizeAtsScoreResult(value);
+}
 
-  if (!jobDescription || !resumeText.trim()) {
+function updateAtsScore() {
+  if (tailorInProgress || !hasTailoredResume()) {
     els.atsScoreSection.hidden = true;
     return;
   }
 
-  const useAi = usingTailored && latestAtsFromAi;
-  const result = useAi
-    ? {
-        score: latestAtsFromAi.score,
-        matched: [],
-        missing: latestAtsFromAi.missingKeywords,
-        total: latestAtsFromAi.missingKeywords.length,
-        summary: latestAtsFromAi.summary,
-      }
-    : computeAtsScore(resumeText, jobDescription);
-
-  const tier = scoreTier(result.score);
-
   els.atsScoreSection.hidden = false;
-  els.atsResumeSource.textContent = useAi ? "ChatGPT" : sourceLabel;
-  els.atsScoreValue.textContent = String(result.score);
-  els.atsScoreRing.className = `ats-score-ring tier-${tier}`;
-  els.atsScoreRing.setAttribute(
-    "aria-label",
-    `ATS match score ${result.score} percent`
-  );
 
-  if (useAi) {
+  const atsScore = normalizeDisplayAtsScore(latestAtsFromAi);
+  if (!atsScore) {
+    els.atsResumeSource.textContent = "ChatGPT";
+    els.atsScoreValue.textContent = "—";
+    els.atsScoreRing.className = "ats-score-ring";
+    els.atsScoreRing.setAttribute("aria-label", "ATS match score unavailable");
     els.atsScoreSummary.textContent =
-      result.summary ||
-      `ChatGPT estimates ${result.score}% ATS match for this tailored resume.`;
-    els.atsMissingCount.textContent = String(result.missing.length);
-    renderAtsKeywordList(els.atsMissingList, result.missing);
-    els.atsMissingDetails.hidden = result.missing.length === 0;
-    return;
-  }
-
-  if (!result.total) {
-    els.atsScoreSummary.textContent =
-      "Add more detail to the job description to calculate keyword overlap.";
+      "No ATS score was returned. Try re-tailoring this job.";
     els.atsMissingDetails.hidden = true;
     return;
   }
 
-  els.atsScoreSummary.textContent = `${result.matched.length} of ${result.total} job keywords found in your ${sourceLabel.toLowerCase()}.`;
-  els.atsMissingCount.textContent = String(result.missing.length);
-  renderAtsKeywordList(els.atsMissingList, result.missing);
-  els.atsMissingDetails.hidden = result.missing.length === 0;
+  const tier = scoreTier(atsScore.score);
+  const missingKeywords = atsScore.missingKeywords ?? [];
+
+  els.atsResumeSource.textContent = "ChatGPT";
+  els.atsScoreValue.textContent = String(atsScore.score);
+  els.atsScoreRing.className = `ats-score-ring tier-${tier}`;
+  els.atsScoreRing.setAttribute(
+    "aria-label",
+    `ATS match score ${atsScore.score} percent`
+  );
+  els.atsScoreSummary.textContent =
+    atsScore.summary ||
+    `ChatGPT estimates ${atsScore.score}% ATS match for this tailored resume.`;
+  els.atsMissingCount.textContent = String(missingKeywords.length);
+  renderAtsKeywordList(els.atsMissingList, missingKeywords);
+  els.atsMissingDetails.hidden = missingKeywords.length === 0;
 }
 
-function renderTailorChanges(changes) {
-  els.tailoredChangesList.innerHTML = "";
-
-  if (!changes.length) {
-    els.tailoredChangesWrap.hidden = true;
-    return;
-  }
-
-  for (const change of changes) {
-    const item = document.createElement("li");
-    item.textContent = change;
-    els.tailoredChangesList.appendChild(item);
-  }
-
-  els.tailoredChangesWrap.hidden = false;
-}
-
-function showTailoredResume(structured, changes = [], atsScore = latestAtsFromAi) {
+function showTailoredResume(structured, changes = [], atsScore) {
   latestTailorChanges = changes;
-  latestAtsFromAi = atsScore;
+  if (atsScore !== undefined) {
+    latestAtsFromAi = atsScore;
+  }
+  tailoredResumeReady = hasResumeContent(structured);
   tailoredEditor.setStructured(structured, { silent: true });
-  renderTailorChanges(changes);
-  els.tailoredResumeSection.hidden = false;
+  if (!tailorInProgress) {
+    els.tailoredResumeSection.hidden = false;
+  }
   updateAtsScore();
   updateApplicationActionButton();
+  if (!tailorInProgress && hasTailoredResume()) {
+    els.atsScoreSection.scrollIntoView({ block: "nearest" });
+  }
 }
 
 async function persistProfile() {
@@ -653,25 +572,8 @@ async function persistProfile() {
     [PROFILE_KEY]: text,
     [PROFILE_STRUCTURED_KEY]: structured,
   });
-  updateProfileSourceSummary();
 }
 
-async function persistTailoredResume({
-  changes = latestTailorChanges,
-  atsScore,
-} = {}) {
-  if (changes !== undefined) {
-    latestTailorChanges = changes;
-  }
-  if (atsScore !== undefined) {
-    latestAtsFromAi = atsScore;
-  }
-  await persistJobContext();
-}
-
-/**
- * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
- */
 async function openHistoryEntry(entry) {
   els.jobDescription.value = entry.jobDescription;
   els.companyName.value = entry.companyName || "";
@@ -682,18 +584,130 @@ async function openHistoryEntry(entry) {
   setStatus("");
 }
 
+/**
+ * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
+ */
+function historyEntryCompanyName(entry) {
+  const company = entry.companyName?.trim();
+  if (company) return company;
+
+  const title = entry.title?.trim() || "";
+  if (title.includes(" · ")) {
+    return title.split(" · ")[0].trim();
+  }
+
+  return "";
+}
+
+/**
+ * @param {string} companyName
+ */
+function historyCompanyInitial(companyName) {
+  const match = companyName.match(/[A-Za-z0-9]/);
+  return match ? match[0].toUpperCase() : "?";
+}
+
+/**
+ * @param {string} companyName
+ */
+function historyCompanyLogoHue(companyName) {
+  const seed = companyName.trim().toLowerCase() || "?";
+  let hash = 0;
+
+  for (let i = 0; i < seed.length; i++) {
+    hash = seed.charCodeAt(i) + ((hash << 5) - hash);
+  }
+
+  return Math.abs(hash) % 360;
+}
+
+/**
+ * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
+ */
+function historyEntryPosition(entry) {
+  const role = inferJobRole(entry.jobDescription);
+  if (role) return role;
+
+  const title = entry.title?.trim() || "";
+  const company = entry.companyName?.trim() || "";
+  if (company && title.includes(" · ")) {
+    return title.split(" · ").slice(1).join(" · ").trim();
+  }
+
+  return title;
+}
+
+/**
+ * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
+ * @param {string} companyQuery
+ * @param {string} positionQuery
+ */
+function matchesHistorySearch(entry, companyQuery, positionQuery) {
+  if (companyQuery) {
+    const company = (entry.companyName || "").toLowerCase();
+    if (!company.includes(companyQuery.toLowerCase())) return false;
+  }
+
+  if (positionQuery) {
+    const query = positionQuery.toLowerCase();
+    const position = historyEntryPosition(entry).toLowerCase();
+    const title = (entry.title || "").toLowerCase();
+    if (!position.includes(query) && !title.includes(query)) return false;
+  }
+
+  return true;
+}
+
 async function renderHistory() {
   const history = await loadTailorHistory();
+  const companyQuery = els.historyCompanySearch.value.trim();
+  const positionQuery = els.historyPositionSearch.value.trim();
+  const filtered = history.filter((entry) =>
+    matchesHistorySearch(entry, companyQuery, positionQuery)
+  );
+
   els.historyList.innerHTML = "";
 
   const hasHistory = history.length > 0;
-  els.historyEmpty.hidden = hasHistory;
+  const hasFilters = Boolean(companyQuery || positionQuery);
+  els.historySearch.hidden = !hasHistory;
   els.clearHistory.hidden = !hasHistory;
 
-  for (const entry of history) {
+  if (!hasHistory) {
+    els.historyEmpty.textContent =
+      "No tailor sessions yet. Tailor a resume on the Application tab.";
+    els.historyEmpty.hidden = false;
+    return;
+  }
+
+  if (filtered.length === 0) {
+    els.historyEmpty.textContent = hasFilters
+      ? "No matching tailor sessions."
+      : "No tailor sessions yet. Tailor a resume on the Application tab.";
+    els.historyEmpty.hidden = false;
+    return;
+  }
+
+  els.historyEmpty.hidden = true;
+
+  for (const entry of filtered) {
     const item = document.createElement("li");
     item.className = "history-item";
     item.dataset.historyId = entry.id;
+
+    const body = document.createElement("div");
+    body.className = "history-item-body";
+
+    const companyName = historyEntryCompanyName(entry);
+    const logo = document.createElement("div");
+    logo.className = "history-company-logo";
+    logo.style.setProperty("--history-logo-hue", String(historyCompanyLogoHue(companyName)));
+    logo.textContent = historyCompanyInitial(companyName);
+    logo.title = companyName || "Unknown company";
+    logo.setAttribute("aria-hidden", "true");
+
+    const content = document.createElement("div");
+    content.className = "history-item-content";
 
     const header = document.createElement("div");
     header.className = "history-item-header";
@@ -732,6 +746,12 @@ async function renderHistory() {
     const actions = document.createElement("div");
     actions.className = "history-actions";
 
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "link-btn";
+    editBtn.dataset.action = "edit";
+    editBtn.textContent = "Edit";
+
     const openBtn = document.createElement("button");
     openBtn.type = "button";
     openBtn.className = "link-btn";
@@ -744,7 +764,7 @@ async function renderHistory() {
     deleteBtn.dataset.action = "delete";
     deleteBtn.textContent = "Delete";
 
-    actions.append(openBtn, deleteBtn);
+    actions.append(editBtn, openBtn, deleteBtn);
 
     const details = document.createElement("details");
     details.className = "history-details";
@@ -768,7 +788,9 @@ async function renderHistory() {
       details.appendChild(changesList);
     }
 
-    item.append(header, title, preview, actions, details);
+    content.append(header, title, preview, actions, details);
+    body.append(logo, content);
+    item.append(body);
     els.historyList.appendChild(item);
   }
 }
@@ -781,16 +803,17 @@ async function onHistoryListClick(event) {
   const id = item?.dataset.historyId;
   if (!id) return;
 
+  if (button.dataset.action === "edit" || button.dataset.action === "open") {
+    const history = await loadTailorHistory();
+    const entry = history.find((record) => record.id === id);
+    if (entry) await openHistoryEntry(entry);
+    return;
+  }
+
   if (button.dataset.action === "delete") {
     await removeTailorHistoryEntry(id);
     await renderHistory();
     return;
-  }
-
-  if (button.dataset.action === "open") {
-    const history = await loadTailorHistory();
-    const entry = history.find((record) => record.id === id);
-    if (entry) await openHistoryEntry(entry);
   }
 }
 
@@ -835,18 +858,7 @@ async function onSaveProfile() {
 async function onClearProfile() {
   profileEditor.setStructured(emptyResume());
   await chrome.storage.local.remove([PROFILE_KEY, PROFILE_STRUCTURED_KEY]);
-  updateProfileSourceSummary();
   setProfileStatus("Basic resume cleared.", "success");
-}
-
-async function onSaveTailoredResume() {
-  const text = tailoredEditor.getText();
-  if (!text.trim()) {
-    setStatus("Nothing to save.", "error");
-    return;
-  }
-  await persistTailoredResume();
-  setStatus("Tailored resume saved.", "success");
 }
 
 async function onProfileFile(event) {
@@ -861,8 +873,7 @@ async function onProfileFile(event) {
 
   try {
     const text = await readResumeFile(file);
-    els.profileSourceText.value = text;
-    await runFillProfile();
+    await runFillProfile(text);
   } catch (err) {
     setProfileStatus(err.message || "Could not read file.", "error");
     setProfileFillBusy(false);
@@ -915,28 +926,22 @@ function setProfileFillBusy(busy) {
   els.fillProfileBtn.textContent = busy ? "Importing…" : defaultLabel;
 }
 
-async function onFillProfile() {
-  if (!els.profileSourceText.value.trim()) {
-    els.profileFile.click();
-    return;
-  }
-
-  await runFillProfile();
+function onFillProfile() {
+  els.profileFile.click();
 }
 
 function hasResumeContent(structured) {
   return Boolean(serializeResume(structured).trim());
 }
 
-async function runFillProfile() {
-  const sourceText = els.profileSourceText.value.trim();
-  const existingResume = sourceText
+async function runFillProfile(sourceText = "") {
+  const trimmedSource = sourceText.trim();
+  const existingResume = trimmedSource
     ? ""
     : serializeResume(profileEditor.getStructured());
-  const extraInstructions = els.profileFillInstructions.value.trim();
 
-  if (!sourceText && !existingResume.trim()) {
-    setProfileStatus("Paste resume text or choose a file.", "error");
+  if (!trimmedSource && !existingResume.trim()) {
+    setProfileStatus("Choose a file to import.", "error");
     return;
   }
 
@@ -947,9 +952,9 @@ async function runFillProfile() {
     const response = await chrome.runtime.sendMessage({
       type: "FILL_PROFILE",
       payload: {
-        sourceText,
+        sourceText: trimmedSource,
         existingResume,
-        extraInstructions,
+        extraInstructions: "",
         autoSend: true,
       },
     });
@@ -971,7 +976,7 @@ async function runFillProfile() {
     await persistProfile();
     setProfileStatus("Profile fields filled from ChatGPT.", "success");
   } catch (err) {
-    const localStructured = sourceText ? parseResumeText(sourceText) : null;
+    const localStructured = trimmedSource ? parseResumeText(trimmedSource) : null;
     if (localStructured && hasResumeContent(localStructured)) {
       profileEditor.setStructured(localStructured);
       await persistProfile();
@@ -988,18 +993,22 @@ async function runFillProfile() {
 }
 
 function setTailorBusy(busy) {
-  const tailorLabel = els.tailorBtn.dataset.tailorLabel || "Tailor";
-
   if (busy) {
-    els.tailorBtn.dataset.mode = "tailor";
-    els.retailorBtn.hidden = true;
+    els.applicationActionsSecondary.hidden = true;
+    els.tailoredResumeSection.hidden = true;
+    els.atsScoreSection.hidden = true;
     els.tailorBtn.disabled = true;
+    els.downloadResumeBtn.disabled = true;
+    els.previewResumeBtn.disabled = true;
     els.tailorBtn.classList.add("busy");
     els.tailorBtn.setAttribute("aria-busy", "true");
-    els.tailorBtn.textContent = "Tailoring…";
+    setTailorBtnLabel("Tailoring…");
     return;
   }
 
+  if (hasTailoredResume()) {
+    els.tailoredResumeSection.hidden = false;
+  }
   updateApplicationActionButton();
 }
 
@@ -1024,12 +1033,10 @@ async function onTailor() {
     return;
   }
 
-  await flushJobContextSave();
-
-  const sessionContextKey =
-    activeJobContextKey || getJobContextKey(browserTab.url, browserTab.tabId);
+  const sessionContextKey = getJobContextKey(browserTab.url, browserTab.tabId);
   activeJobContextKey = sessionContextKey;
   activeBrowserTabId = browserTab.tabId;
+  await flushJobContextSave();
 
   tailorSession = {
     tabId: browserTab.tabId,
@@ -1051,6 +1058,7 @@ async function onTailor() {
         resume,
         jobDescription,
         autoSend: els.autoSend.checked,
+        jobWindowId: browserTab.windowId,
         options: {
           tone: els.tone.value,
           outputFormat: els.outputFormat.value,
@@ -1072,13 +1080,31 @@ async function onTailor() {
       const { structured, changes, atsScore } = parseTailorResponse(
         response.responseText
       );
-      showTailoredResume(structured, changes, atsScore);
+      if (!hasResumeContent(structured)) {
+        throw new Error(
+          "ChatGPT finished but no usable resume JSON was captured. Check the ChatGPT tab and try again."
+        );
+      }
+      const { coreSkills } = analyzeJobCoreSkills(jobDescription);
+      const enriched = ensureCoreSkillsInTailoredResume(
+        structured,
+        coreSkills,
+        resume
+      );
+      showTailoredResume(enriched, changes, atsScore);
       activeJobContextKey = tailorSession.contextKey;
       activeBrowserTabId = tailorSession.tabId;
-      await persistJobContext(tailorSession.contextKey);
+      await saveJobContext(tailorSession.contextKey, {
+        ...collectApplicationState(),
+        resumeText: serializeResume(enriched),
+        structured: enriched,
+        changes,
+        atsScore,
+      });
+      updateAtsScore();
       await recordTailorHistory({
         jobDescription,
-        structured,
+        structured: enriched,
         changes,
         atsScore,
         companyName: els.companyName.value.trim(),

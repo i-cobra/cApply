@@ -19,34 +19,27 @@
   </header>
 
   <main id="panel-profile" class="tab-panel" role="tabpanel" aria-labelledby="tab-profile" hidden>
-    <section class="field profile-fill-field">
-      <label for="profileSourceText">Resume source</label>
-      <p class="field-hint">Paste resume text or click Import from PDF to choose a .txt, .md, or .pdf file.</p>
-      <textarea id="profileSourceText" rows="5" placeholder="Paste resume text here…"></textarea>
-      <label class="full-width profile-fill-instructions">
-        Extra instructions (optional)
-        <input type="text" id="profileFillInstructions" placeholder="e.g. Emphasize leadership roles" />
-      </label>
+    <section class="field profile-import-field">
       <input type="file" id="profileFile" accept=".txt,.md,.pdf" hidden />
-      <button type="button" id="fillProfileBtn" class="primary profile-fill-btn" data-default-label="Import from PDF">
-        Import from PDF
-      </button>
+      <div class="profile-actions">
+        <button type="button" id="fillProfileBtn" class="primary profile-action-btn" data-default-label="Import from PDF">
+          Import from PDF
+        </button>
+        <div class="profile-actions-row">
+          <button type="button" id="saveProfile" class="primary profile-action-btn">Save profile</button>
+          <button type="button" id="clearProfile" class="primary danger profile-action-btn">Clear</button>
+        </div>
+      </div>
     </section>
 
     <section class="field resume-field-wrap">
       <div class="field-header">
         <label>Basic resume</label>
-        <div class="field-actions">
-          <button type="button" id="clearProfile" class="link-btn">Clear</button>
-        </div>
       </div>
       <p class="field-hint">Your master resume. Tailoring uses a copy and never changes this.</p>
       <div id="profileResumeEditor"></div>
     </section>
 
-    <footer class="tab-footer">
-      <button type="button" id="saveProfile" class="ghost-btn">Save profile</button>
-    </footer>
     <p id="profileStatus" class="status" role="status" aria-live="polite"></p>
   </main>
 
@@ -69,100 +62,94 @@
       </div>
       <textarea id="jobDescription" rows="6" placeholder="Paste the job posting here…"></textarea>
 
-      <section class="field profile-source">
-        <div class="field-header">
-          <label>Resume source</label>
-          <button type="button" id="goToProfile" class="link-btn">Edit in Profile</button>
+      <details class="options">
+        <summary>Options</summary>
+        <div class="options-grid">
+          <label>
+            Tone
+            <select id="tone">
+              <option value="professional">Professional</option>
+              <option value="concise">Concise</option>
+              <option value="executive">Executive</option>
+              <option value="friendly">Friendly</option>
+            </select>
+          </label>
+          <label>
+            Output
+            <select id="outputFormat">
+              <option value="full resume">Full resume</option>
+              <option value="resume bullets only">Bullets only</option>
+              <option value="cover letter + resume">Cover letter + resume</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="autoSend" checked />
+            Auto-send to ChatGPT
+          </label>
         </div>
-        <p id="profileSourceSummary" class="profile-source-summary">Loading profile…</p>
-      </section>
+        <label class="full-width">
+          Extra instructions (optional)
+          <input type="text" id="extraInstructions" placeholder="e.g. Keep to one page, emphasize Python experience" />
+        </label>
+      </details>
 
       <div class="application-actions">
+        <button type="button" id="newApplicationBtn" class="primary">New</button>
         <button
           type="button"
           id="tailorBtn"
-          class="primary"
+          class="primary tailor-btn"
           data-tailor-label="Tailor"
-          data-download-label="Download resume"
+          data-retailor-label="Re-tailor"
         >
-          Tailor
-        </button>
-        <button type="button" id="retailorBtn" class="link-btn application-retailor" hidden>
-          Re-tailor
+          <span class="tailor-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+              <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142-.0852 4.783-2.7582a.7712.7712 0 0 0 .7806 0l5.8428 3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+            </svg>
+          </span>
+          <span class="tailor-btn-label">Tailor</span>
         </button>
       </div>
-      <p id="status" class="status" role="status" aria-live="polite"></p>
-    </section>
 
-    <section id="atsScoreSection" class="field ats-score-section" hidden>
-      <div class="field-header">
-        <label>ATS score</label>
-        <span id="atsResumeSource" class="ats-source-badge">Profile resume</span>
+      <div id="applicationActionsSecondary" class="application-actions application-actions-secondary" hidden>
+        <button type="button" id="downloadResumeBtn" class="primary">Download resume</button>
+        <button type="button" id="previewResumeBtn" class="primary">Preview resume</button>
       </div>
-      <div class="ats-score-card">
-        <div
-          id="atsScoreRing"
-          class="ats-score-ring"
-          role="img"
-          aria-label="ATS match score"
-        >
-          <span id="atsScoreValue" class="ats-score-value">—</span>
-          <span class="ats-score-unit">%</span>
+
+      <section id="atsScoreSection" class="field ats-score-section" hidden>
+        <div class="field-header">
+          <label>ATS score</label>
+          <span id="atsResumeSource" class="ats-source-badge">ChatGPT</span>
         </div>
-        <div class="ats-score-details">
-          <p id="atsScoreSummary" class="ats-score-summary"></p>
-          <details id="atsMissingDetails" class="ats-keyword-details">
-            <summary>Missing keywords (<span id="atsMissingCount">0</span>)</summary>
-            <ul id="atsMissingList" class="ats-keyword-list"></ul>
-          </details>
+        <div class="ats-score-card">
+          <div
+            id="atsScoreRing"
+            class="ats-score-ring"
+            role="img"
+            aria-label="ATS match score"
+          >
+            <span id="atsScoreValue" class="ats-score-value">—</span>
+            <span class="ats-score-unit">%</span>
+          </div>
+          <div class="ats-score-details">
+            <p id="atsScoreSummary" class="ats-score-summary"></p>
+            <details id="atsMissingDetails" class="ats-keyword-details">
+              <summary>Missing keywords (<span id="atsMissingCount">0</span>)</summary>
+              <ul id="atsMissingList" class="ats-keyword-list"></ul>
+            </details>
+          </div>
         </div>
-      </div>
+      </section>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
     </section>
 
     <section id="tailoredResumeSection" class="field resume-field-wrap tailored-resume-section" hidden>
       <div class="field-header">
         <label>Tailored resume</label>
       </div>
-      <div id="tailoredChangesWrap" class="tailored-changes-wrap" hidden>
-        <p class="tailored-changes-title">Changes made</p>
-        <ul id="tailoredChangesList" class="tailored-changes-list"></ul>
-      </div>
       <div id="tailoredResumeEditor"></div>
-      <footer class="tab-footer">
-        <button type="button" id="saveTailoredResume" class="ghost-btn">Save tailored resume</button>
-      </footer>
     </section>
-
-    <details class="options">
-      <summary>Options</summary>
-      <div class="options-grid">
-        <label>
-          Tone
-          <select id="tone">
-            <option value="professional">Professional</option>
-            <option value="concise">Concise</option>
-            <option value="executive">Executive</option>
-            <option value="friendly">Friendly</option>
-          </select>
-        </label>
-        <label>
-          Output
-          <select id="outputFormat">
-            <option value="full resume">Full resume</option>
-            <option value="resume bullets only">Bullets only</option>
-            <option value="cover letter + resume">Cover letter + resume</option>
-          </select>
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" id="autoSend" checked />
-          Auto-send to ChatGPT
-        </label>
-      </div>
-      <label class="full-width">
-        Extra instructions (optional)
-        <input type="text" id="extraInstructions" placeholder="e.g. Keep to one page, emphasize Python experience" />
-      </label>
-    </details>
   </main>
 
   <main id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
@@ -170,6 +157,34 @@
       <div class="field-header">
         <label>Tailor history</label>
         <button type="button" id="clearHistory" class="link-btn" hidden>Clear all</button>
+      </div>
+      <div id="historySearch" class="history-search" hidden>
+        <div class="history-search-field">
+          <svg class="history-search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="8.5" cy="8.5" r="5.25" stroke="currentColor" stroke-width="1.6" />
+            <path d="M12.5 12.5L16.5 16.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+          <input
+            type="search"
+            id="historyCompanySearch"
+            placeholder="Search company"
+            aria-label="Search by company"
+            autocomplete="off"
+          />
+        </div>
+        <div class="history-search-field">
+          <svg class="history-search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="8.5" cy="8.5" r="5.25" stroke="currentColor" stroke-width="1.6" />
+            <path d="M12.5 12.5L16.5 16.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+          <input
+            type="search"
+            id="historyPositionSearch"
+            placeholder="Search position"
+            aria-label="Search by position"
+            autocomplete="off"
+          />
+        </div>
       </div>
       <p id="historyEmpty" class="field-hint">No tailor sessions yet. Tailor a resume on the Application tab.</p>
       <ul id="historyList" class="history-list"></ul>

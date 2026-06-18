@@ -1,59 +1,58 @@
 import { buildFillProfilePrompt, buildTailorPrompt } from "./lib/prompt.js";
+import { parseTailorResponse } from "./lib/tailor-response.js";
+import { serializeResume } from "./lib/resume-structure.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const CHATGPT_HOSTS = ["chatgpt.com", "chat.openai.com"];
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-});
-
-function notifyJobTabChanged(tabId, url, reason) {
-  chrome.runtime
-    .sendMessage({ type: "JOB_TAB_CHANGED", tabId, url, reason })
-    .catch(() => {});
-}
-
-/** @type {Map<number, ReturnType<typeof setTimeout>>} */
-const urlChangeTimers = new Map();
-
-chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+async function enableSidePanelForAllTabs() {
   try {
-    const tab = await chrome.tabs.get(tabId);
     await chrome.sidePanel.setOptions({
-      tabId,
       path: "popup/popup.html",
       enabled: true,
     });
-    notifyJobTabChanged(tabId, tab.url || "", "activated");
   } catch {
-    // ignore restricted tabs
+    // ignore
   }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  enableSidePanelForAllTabs();
 });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url) return;
-
-  chrome.sidePanel
-    .setOptions({
-      tabId,
-      path: "popup/popup.html",
-      enabled: true,
-    })
-    .catch(() => {});
-
-  const existing = urlChangeTimers.get(tabId);
-  if (existing) clearTimeout(existing);
-
-  urlChangeTimers.set(
-    tabId,
-    setTimeout(() => {
-      urlChangeTimers.delete(tabId);
-      notifyJobTabChanged(tabId, tab.url || "", "url");
-    }, 400)
-  );
+chrome.runtime.onStartup.addListener(() => {
+  enableSidePanelForAllTabs();
 });
+
+/** @type {Map<string, string>} */
+const resumePreviewCache = new Map();
+
+const PREVIEW_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function storeResumePreview(base64) {
+  const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  resumePreviewCache.set(id, base64);
+  globalThis.setTimeout(() => {
+    resumePreviewCache.delete(id);
+  }, PREVIEW_CACHE_TTL_MS);
+  return id;
+}
+
+async function openResumePreviewTab(id, label = "") {
+  const previewUrl = new URL(chrome.runtime.getURL("preview/resume-preview.html"));
+  previewUrl.searchParams.set("id", id);
+  if (label) {
+    previewUrl.searchParams.set("title", label);
+  }
+
+  await chrome.tabs.create({
+    url: previewUrl.toString(),
+    active: true,
+  });
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "TAILOR_RESUME") {
@@ -83,7 +82,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
+
+  if (message.type === "PREVIEW_RESUME") {
+    handlePreviewResume(message)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === "GET_RESUME_PREVIEW") {
+    const base64 = resumePreviewCache.get(message.id);
+    if (!base64) {
+      sendResponse({ ok: false, error: "Preview expired or not found." });
+      return false;
+    }
+    resumePreviewCache.delete(message.id);
+    sendResponse({ ok: true, base64 });
+    return false;
+  }
 });
+
+async function handlePreviewResume(message) {
+  const base64 = message.base64;
+  if (!base64 || typeof base64 !== "string") {
+    throw new Error("Missing resume preview data.");
+  }
+
+  const id = storeResumePreview(base64);
+  const title = typeof message.title === "string" ? message.title.trim() : "";
+  await openResumePreviewTab(id, title);
+  return { ok: true };
+}
 
 async function handleGrabPageText() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -130,7 +159,7 @@ async function handleGrabPageText() {
 }
 
 async function handleTailorResume(payload) {
-  const { resume, jobDescription, options, autoSend } = payload;
+  const { resume, jobDescription, options, autoSend, jobWindowId } = payload;
 
   if (!resume?.trim()) {
     throw new Error("Resume is empty. Add your resume in the extension popup.");
@@ -140,7 +169,7 @@ async function handleTailorResume(payload) {
   }
 
   const prompt = buildTailorPrompt({ resume, jobDescription, options });
-  return runChatGPTPrompt(prompt, autoSend);
+  return runChatGPTPrompt(prompt, autoSend, jobWindowId);
 }
 
 async function handleFillProfile(payload) {
@@ -167,8 +196,9 @@ async function getJobTabContext() {
   };
 }
 
-async function runChatGPTPrompt(prompt, autoSend) {
-  const { jobWindowId } = await getJobTabContext();
+async function runChatGPTPrompt(prompt, autoSend, explicitJobWindowId) {
+  const jobWindowId =
+    explicitJobWindowId ?? (await getJobTabContext()).jobWindowId;
   const tab = await findOrOpenChatGPTTab(jobWindowId);
 
   await ensureTabAwake(tab.id);
@@ -183,7 +213,7 @@ async function runChatGPTPrompt(prompt, autoSend) {
     return { ok: true, tabId: tab.id, sent: false, responseText: "" };
   }
 
-  const responseText = await runPromptAsync(tab.id, prompt);
+  const responseText = await runPromptWithPolling(tab.id, prompt);
 
   return {
     ok: true,
@@ -193,14 +223,353 @@ async function runChatGPTPrompt(prompt, autoSend) {
   };
 }
 
+function hasBalancedJsonBraces(text) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth += 1;
+    if (ch === "}") depth -= 1;
+  }
+
+  return depth === 0;
+}
+
+function hasTailorResumeMarkers(text) {
+  if (!text?.includes("{")) return false;
+  return (
+    text.includes('"tailoredResume"') ||
+    text.includes('"resume"') ||
+    text.includes('"contact"')
+  );
+}
+
+function hasTailorResumeJson(text) {
+  if (!hasTailorResumeMarkers(text) || text.length <= 80) return false;
+  if (hasAtsScoreProperty(text) && text.length > 200) return true;
+  return hasBalancedJsonBraces(text);
+}
+
+function hasAtsScoreProperty(text) {
+  return text.includes('"atsScore"') || text.includes('"ats_score"');
+}
+
+function looksLikeTailorJson(text) {
+  return hasTailorResumeMarkers(text) && hasAtsScoreProperty(text) && text.length > 80;
+}
+
+function pickCaptureText(capture) {
+  const stream = capture.streamText || "";
+  const dom = capture.domText || "";
+  const hasNew = Boolean(capture.hasNewAssistant);
+  const inFlight = Boolean(capture.generating || capture.streamStarted);
+
+  if (!hasNew && !inFlight) return "";
+
+  if (inFlight && !hasNew) return stream;
+
+  if (
+    dom.includes('"tailoredResume"') &&
+    dom.includes('"atsScore"') &&
+    dom.length > 200
+  ) {
+    return dom;
+  }
+
+  if (!stream) return dom;
+  if (!dom) return stream;
+
+  const streamHasAts = hasAtsScoreProperty(stream);
+  const domHasAts = hasAtsScoreProperty(dom);
+
+  if (domHasAts && !streamHasAts) return dom;
+  if (streamHasAts && !domHasAts) return stream;
+
+  return dom.length > stream.length ? dom : stream;
+}
+
+async function injectAndSend(tabId, prompt) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => window.__cApplyResetStreamCapture?.(),
+  });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const [{ result: fillResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: (text) => window.__cApplyRunInjectSync(text, false),
+      args: [prompt],
+    });
+
+    if (!fillResult?.ok) {
+      if (attempt === 1) {
+        return fillResult || { ok: false, error: "Could not fill ChatGPT composer." };
+      }
+      await sleep(1000);
+      continue;
+    }
+
+    await sleep(attempt === 0 ? 900 : 1200);
+
+    const ready = await waitForComposerReady(tabId, 4000);
+    if (!ready.ready) {
+      if (attempt === 1) {
+        return { ok: false, error: ready.error || "ChatGPT composer did not accept the prompt." };
+      }
+      continue;
+    }
+
+    const [{ result: sendResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplySubmitComposer?.(),
+    });
+
+    if (sendResult?.ok && sendResult.sent) {
+      return sendResult;
+    }
+
+    if (attempt === 1) {
+      return sendResult || { ok: false, error: "Could not send prompt to ChatGPT." };
+    }
+  }
+
+  return { ok: false, error: "Could not send prompt to ChatGPT." };
+}
+
+async function waitForComposerReady(tabId, maxMs = 4000) {
+  const deadline = Date.now() + maxMs;
+
+  while (Date.now() < deadline) {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () =>
+        typeof window.__cApplyComposerReady === "function"
+          ? window.__cApplyComposerReady(20)
+          : { ready: true },
+    });
+
+    if (result?.ready) return result;
+    await sleep(250);
+  }
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () =>
+      typeof window.__cApplyComposerReady === "function"
+        ? window.__cApplyComposerReady(20)
+        : { ready: false, error: "Composer check unavailable." },
+  });
+
+  return result || { ready: false, error: "ChatGPT composer did not accept the prompt." };
+}
+
+async function pollCapture(tabId, assistantCountBefore = 0) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: (countBefore) => {
+      const stream =
+        typeof window.__cApplyPollStreamCapture === "function"
+          ? window.__cApplyPollStreamCapture()
+          : null;
+
+      const domPoll =
+        typeof window.__cApplyPollChatGPTResponse === "function"
+          ? window.__cApplyPollChatGPTResponse(countBefore)
+          : null;
+
+      return {
+        streamText: stream?.text?.trim() || "",
+        streamDone: Boolean(stream?.done),
+        streamStarted: Boolean(stream?.started),
+        streamError: stream?.error || null,
+        generating: Boolean(stream?.generating || domPoll?.generating),
+        hasNewAssistant: Boolean(domPoll?.hasNew),
+        domText: (domPoll?.domText || domPoll?.text || "").trim(),
+      };
+    },
+    args: [assistantCountBefore],
+  });
+
+  return result || {};
+}
+
+async function runPromptWithPolling(tabId, prompt) {
+  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplyStartKeepalive?.(),
+    });
+
+    const sendResult = await injectAndSend(tabId, prompt);
+    if (!sendResult?.ok || !sendResult.sent) {
+      throw new Error(sendResult?.error || "Could not send prompt to ChatGPT.");
+    }
+
+    const assistantCountBefore = sendResult.assistantCountBefore ?? 0;
+
+    const startedDeadline = Date.now() + 20000;
+    while (Date.now() < startedDeadline) {
+      const capture = await pollCapture(tabId, assistantCountBefore);
+      if (
+        capture.streamStarted ||
+        capture.generating ||
+        capture.hasNewAssistant ||
+        capture.streamText
+      ) {
+        break;
+      }
+      await sleep(500);
+    }
+
+    let lastError = "ChatGPT did not return resume JSON.";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const text = await waitForCapturedResponse(tabId, assistantCountBefore);
+      if (text) return text;
+      await sleep(1000);
+    }
+
+    throw new Error(lastError);
+  } finally {
+    await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => window.__cApplyStopKeepalive?.(),
+      })
+      .catch(() => {});
+    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
+  }
+}
+
+function isRecoverableStreamCaptureError(message) {
+  if (!message) return false;
+  return (
+    /abort/i.test(message) ||
+    /BodyStreamBuffer/i.test(message) ||
+    /cancel/i.test(message)
+  );
+}
+
+function isUsableTailorResponse(text) {
+  if (!text?.trim() || !hasAtsScoreProperty(text)) return false;
+  try {
+    const { structured, atsScore } = parseTailorResponse(text);
+    return Boolean(serializeResume(structured).trim()) && Boolean(atsScore);
+  } catch {
+    return false;
+  }
+}
+
+async function waitForCapturedResponse(tabId, assistantCountBefore) {
+  const deadline = Date.now() + 310000;
+  let lastText = "";
+  let stableRounds = 0;
+
+  while (Date.now() < deadline) {
+    const capture = await pollCapture(tabId, assistantCountBefore);
+
+    if (capture.generating) {
+      stableRounds = 0;
+      lastText = "";
+      await sleep(500);
+      continue;
+    }
+
+    const candidate = pickCaptureText(capture);
+
+    if (
+      capture.streamError &&
+      !candidate &&
+      !isRecoverableStreamCaptureError(capture.streamError)
+    ) {
+      throw new Error(capture.streamError);
+    }
+
+    if (!candidate) {
+      stableRounds = 0;
+      lastText = "";
+      await sleep(500);
+      continue;
+    }
+
+    if (!hasTailorResumeMarkers(candidate) || candidate.length <= 80) {
+      stableRounds = 0;
+      lastText = candidate;
+      await sleep(500);
+      continue;
+    }
+
+    if (!hasAtsScoreProperty(candidate)) {
+      stableRounds = 0;
+      lastText = candidate;
+      await sleep(500);
+      continue;
+    }
+
+    if (candidate === lastText) {
+      stableRounds += 1;
+    } else {
+      stableRounds = 0;
+      lastText = candidate;
+    }
+
+    if (stableRounds >= 2 && isUsableTailorResponse(candidate)) {
+      return candidate;
+    }
+
+    await sleep(500);
+  }
+
+  const finalCapture = await pollCapture(tabId, assistantCountBefore);
+  if (finalCapture.generating) return "";
+
+  const final = pickCaptureText(finalCapture) || lastText?.trim() || "";
+  return isUsableTailorResponse(final) ? final : "";
+}
+
 async function ensurePageApi(tabId) {
   const [{ result: ready }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: () => typeof window.__cApplyRunPromptAsync === "function",
+    func: () =>
+      typeof window.__cApplyRunInjectSync === "function" &&
+      typeof window.__cApplySubmitComposer === "function" &&
+      typeof window.__cApplyComposerReady === "function",
   });
 
   if (ready) return;
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => {
+      window.__cApplyChatGPTInjectLoaded = false;
+    },
+  });
 
   await loadChatGPTPageApi(tabId);
   await sleep(800);
@@ -208,7 +577,10 @@ async function ensurePageApi(tabId) {
   const [{ result: readyAfter }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: () => typeof window.__cApplyRunPromptAsync === "function",
+    func: () =>
+      typeof window.__cApplyRunInjectSync === "function" &&
+      typeof window.__cApplySubmitComposer === "function" &&
+      typeof window.__cApplyComposerReady === "function",
   });
 
   if (!readyAfter) {
@@ -276,127 +648,6 @@ async function runInjectOnly(tabId, prompt) {
   }
 }
 
-async function runPromptAsync(tabId, prompt) {
-  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
-
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: () => window.__cApplyStartKeepalive?.(),
-    });
-
-    const [{ result: started }] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: (text) => {
-        if (typeof window.__cApplyRunPromptAsync !== "function") {
-          window.__cApplyJobResult = {
-            status: "error",
-            error: "ChatGPT async API missing.",
-          };
-          return { started: false };
-        }
-
-        window.__cApplyJobResult = { status: "running" };
-        window.__cApplyRunPromptAsync(text, true)
-          .then((responseText) => {
-            window.__cApplyJobResult = {
-              status: "done",
-              responseText: responseText || "",
-            };
-          })
-          .catch((err) => {
-            window.__cApplyJobResult = {
-              status: "error",
-              error: err?.message || String(err),
-            };
-          });
-
-        return { started: true };
-      },
-      args: [prompt],
-    });
-
-    if (!started?.started) {
-      const [{ result: job }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: () => window.__cApplyJobResult,
-      });
-      throw new Error(job?.error || "Could not start ChatGPT request.");
-    }
-
-    const deadline = Date.now() + 310000;
-
-    while (Date.now() < deadline) {
-      await sleep(500);
-
-      const [{ result: state }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: () => {
-          const job = window.__cApplyJobResult || { status: "running" };
-          const stream =
-            typeof window.__cApplyPollStreamCapture === "function"
-              ? window.__cApplyPollStreamCapture()
-              : null;
-
-          if (stream?.text?.trim()) {
-            return {
-              status: "done",
-              responseText: stream.text.trim(),
-            };
-          }
-
-          if (stream?.error) {
-            return { status: "error", error: stream.error };
-          }
-
-          const domPoll =
-            typeof window.__cApplyPollChatGPTResponse === "function"
-              ? window.__cApplyPollChatGPTResponse(0)
-              : null;
-
-          if (domPoll?.text?.trim() && domPoll.hasJson) {
-            return {
-              status: "done",
-              responseText: domPoll.text.trim(),
-            };
-          }
-
-          if (domPoll?.error) {
-            return { status: "error", error: domPoll.error };
-          }
-
-          return job;
-        },
-      });
-
-      if (state?.status === "done") {
-        const text = state.responseText?.trim() || "";
-        if (text) return text;
-        throw new Error(
-          "ChatGPT finished but no JSON response was captured. Try again."
-        );
-      }
-
-      if (state?.status === "error") {
-        throw new Error(state.error || "ChatGPT request failed.");
-      }
-    }
-
-    throw new Error("Timed out waiting for ChatGPT. Try again.");
-  } finally {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: () => window.__cApplyStopKeepalive?.(),
-    }).catch(() => {});
-    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
-  }
-}
-
 async function prepareBackgroundChatGPTTab(tabId) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
   await chrome.scripting.executeScript({
@@ -424,10 +675,9 @@ function isChatGPTUrl(url) {
 }
 
 async function findOrOpenChatGPTTab(jobWindowId) {
-  if (!jobWindowId) {
-    const [jobTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    jobWindowId = jobTab?.windowId;
-  }
+  const allTabs = await chrome.tabs.query({});
+  const existingAnywhere = allTabs.find((t) => isChatGPTUrl(t.url));
+  if (existingAnywhere?.id) return existingAnywhere;
 
   if (jobWindowId) {
     const inJobWindow = await chrome.tabs.query({ windowId: jobWindowId });
@@ -478,13 +728,6 @@ async function ensureChatGPTReady(tabId) {
     await chrome.tabs.update(tabId, { url: CHATGPT_URL });
     await waitForTabLoad(tabId);
     await sleep(3000);
-    return;
-  }
-
-  if (!url.includes("chatgpt.com") || url.includes("/c/")) {
-    await chrome.tabs.update(tabId, { url: CHATGPT_URL });
-    await waitForTabLoad(tabId);
-    await sleep(2000);
   }
 }
 

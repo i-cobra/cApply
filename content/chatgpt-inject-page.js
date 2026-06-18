@@ -39,12 +39,16 @@
     started: false,
   };
 
+  let streamCaptureGeneration = 0;
+
   function resetStreamCapture() {
+    streamCaptureGeneration += 1;
     window.__cApplyStreamCapture = {
       text: "",
       done: false,
       error: null,
       started: false,
+      generation: streamCaptureGeneration,
     };
     notifyStreamWaiters();
   }
@@ -146,6 +150,12 @@
     return null;
   }
 
+  function getEditorText(editor) {
+    if (!editor) return "";
+    if (editor.tagName === "TEXTAREA") return editor.value || "";
+    return editor.innerText?.trim() || editor.textContent?.trim() || "";
+  }
+
   function setTextareaValue(editor, text) {
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype,
@@ -161,6 +171,28 @@
   }
 
   function fillContentEditable(editor, text) {
+    try {
+      editor.focus({ preventScroll: true });
+    } catch {
+      // ignore
+    }
+
+    try {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      if (document.execCommand("insertText", false, text)) {
+        editor.dispatchEvent(
+          new InputEvent("input", { bubbles: true, inputType: "insertText" })
+        );
+        if (getEditorText(editor).length >= Math.min(text.length, 32)) return;
+      }
+    } catch {
+      // fallback below
+    }
+
     editor.innerHTML = "";
     for (const line of text.split("\n")) {
       const p = document.createElement("p");
@@ -189,28 +221,19 @@
 
   function clickSend(sendBtn) {
     sendBtn.click();
-    sendBtn.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
-    );
-    sendBtn.dispatchEvent(
-      new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
-    );
-    sendBtn.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
-    );
   }
 
   function submitComposer(editor) {
     const sendBtn = findSendButton();
     if (sendBtn) {
       clickSend(sendBtn);
-      return true;
+      return { ok: true, method: "button" };
     }
 
     const form = editor.closest("form");
     if (form) {
       form.requestSubmit();
-      return true;
+      return { ok: true, method: "form" };
     }
 
     editor.dispatchEvent(
@@ -223,8 +246,25 @@
         cancelable: true,
       })
     );
-    return false;
+    return { ok: false, method: "enter" };
   }
+
+  window.__cApplyComposerReady = function (minLength = 20) {
+    spoofPageVisibility();
+    const editor = findEditor();
+    if (!editor) {
+      return { ready: false, error: "Composer not found on page." };
+    }
+
+    const textLength = getEditorText(editor).length;
+    const sendBtn = findSendButton();
+
+    return {
+      ready: textLength >= minLength && Boolean(sendBtn),
+      textLength,
+      hasSend: Boolean(sendBtn),
+    };
+  };
 
   /** @type {Record<string, string>} */
   window.__cApplyCapturedHeaders = window.__cApplyCapturedHeaders || {};
@@ -256,133 +296,66 @@
   }
 
   /**
-   * @param {unknown} value
-   * @param {number} depth
-   * @returns {string[] | null}
-   */
-  function findMessageParts(value, depth = 0) {
-    if (!value || typeof value !== "object" || depth > 10) return null;
-
-    const record = /** @type {Record<string, unknown>} */ (value);
-    const content = record.content;
-    if (content && typeof content === "object") {
-      const parts = /** @type {{ parts?: unknown[] }} */ (content).parts;
-      if (Array.isArray(parts)) {
-        const strings = parts.filter((part) => typeof part === "string");
-        if (strings.length) return strings;
-      }
-    }
-
-    for (const nested of Object.values(record)) {
-      if (!nested || typeof nested !== "object") continue;
-      const found = findMessageParts(nested, depth + 1);
-      if (found) return found;
-    }
-
-    return null;
-  }
-
-  /**
    * @param {unknown} parsed
    * @returns {string}
    */
   function extractStreamChunk(parsed) {
     if (!parsed || typeof parsed !== "object") return "";
 
-    if (Array.isArray(parsed)) {
-      return parsed.map((item) => extractStreamChunk(item)).join("");
-    }
-
     const record = /** @type {Record<string, unknown>} */ (parsed);
 
-    const operation = typeof record.o === "string" ? record.o : "";
-    const path = typeof record.p === "string" ? record.p : "";
-    const value = record.v;
+    if (typeof record.v === "string") return record.v;
 
-    if (
-      operation &&
-      path.includes("content/parts") &&
-      (operation === "append" || operation === "replace" || operation === "add")
-    ) {
-      if (typeof value === "string") return value;
-      if (Array.isArray(value)) {
-        return value.filter((part) => typeof part === "string").join("");
+    const v = record.v;
+    if (v && typeof v === "object") {
+      const vRecord = /** @type {Record<string, unknown>} */ (v);
+      const message = vRecord.message;
+      if (message && typeof message === "object") {
+        const parts = /** @type {{ content?: { parts?: unknown[] } }} */ (message)
+          .content?.parts;
+        if (Array.isArray(parts)) {
+          return parts.filter((p) => typeof p === "string").join("");
+        }
       }
     }
-
-    if (typeof value === "string") {
-      if (!path || path.includes("/message/content/parts") || path.includes("/content/parts")) {
-        return value;
-      }
-    }
-
-    if (Array.isArray(value)) {
-      const nested = value.map((item) => extractStreamChunk(item)).join("");
-      if (nested) return nested;
-    }
-
-    if (value && typeof value === "object") {
-      const nested = extractStreamChunk(value);
-      if (nested) return nested;
-
-      const parts = findMessageParts(value);
-      if (parts) return parts.join("");
-    }
-
-    const parts = findMessageParts(record);
-    if (parts) return parts.join("");
 
     const message = record.message;
     if (message && typeof message === "object") {
-      const messageParts = findMessageParts(message);
-      if (messageParts) return messageParts.join("");
-    }
-
-    const delta = record.delta;
-    if (delta && typeof delta === "object") {
-      const content = /** @type {{ content?: string }} */ (delta).content;
-      if (typeof content === "string") return content;
-    }
-
-    const choices = record.choices;
-    if (Array.isArray(choices)) {
-      return choices
-        .map((choice) => {
-          if (!choice || typeof choice !== "object") return "";
-          const choiceDelta = /** @type {{ delta?: { content?: string } }} */ (choice).delta;
-          return typeof choiceDelta?.content === "string" ? choiceDelta.content : "";
-        })
-        .join("");
+      const parts = /** @type {{ content?: { parts?: unknown[] } }} */ (message)
+        .content?.parts;
+      if (Array.isArray(parts)) {
+        return parts.filter((p) => typeof p === "string").join("");
+      }
     }
 
     return "";
   }
 
-  /**
-   * @param {string} buffer
-   * @returns {string}
-   */
-  function extractJsonFromRawSse(buffer) {
-    const jsonStart = buffer.indexOf("{");
-    const jsonEnd = buffer.lastIndexOf("}");
-    if (jsonStart < 0 || jsonEnd <= jsonStart) return "";
+  function isRecoverableStreamError(err) {
+    const message = err?.message || String(err || "");
+    return (
+      err?.name === "AbortError" ||
+      /abort/i.test(message) ||
+      /BodyStreamBuffer/i.test(message) ||
+      /cancel/i.test(message)
+    );
+  }
 
-    const candidate = buffer.slice(jsonStart, jsonEnd + 1);
-    if (
-      candidate.includes('"tailoredResume"') ||
-      candidate.includes('"resume"') ||
-      candidate.includes('"contact"')
-    ) {
-      return candidate;
-    }
-
-    return "";
+  function markStreamCaptureDone(text = "", error = null, generation = null) {
+    const cap = window.__cApplyStreamCapture || {};
+    if (generation != null && cap.generation !== generation) return;
+    cap.text = text || cap.text || "";
+    cap.error = error;
+    cap.done = true;
+    cap.started = true;
+    notifyStreamWaiters();
   }
 
   /**
    * @param {Response} response
+   * @param {number} generation
    */
-  async function consumeConversationStream(response) {
+  async function consumeConversationStream(response, generation) {
     if (!response.body) {
       throw new Error("Empty response body from ChatGPT.");
     }
@@ -391,56 +364,52 @@
     const decoder = new TextDecoder();
     let buffer = "";
     let fullText = "";
-    let latestFullText = "";
-    let rawSse = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const chunkText = decoder.decode(value, { stream: true });
-      buffer += chunkText;
-      rawSse += chunkText;
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
 
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
 
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed && typeof parsed === "object") {
-            const record = /** @type {Record<string, unknown>} */ (parsed);
-            const streamError =
-              (typeof record.error === "string" && record.error) ||
-              (typeof record.detail === "string" && record.detail);
-            if (streamError) {
-              throw new Error(streamError);
+          try {
+            const parsed = JSON.parse(data);
+            const chunk = extractStreamChunk(parsed);
+            if (chunk) {
+              const cap = window.__cApplyStreamCapture;
+              if (!cap || cap.generation !== generation) return fullText.trim();
+              fullText += chunk;
+              cap.text = fullText;
+              cap.started = true;
             }
+          } catch {
+            // ignore malformed SSE lines
           }
-
-          const chunk = extractStreamChunk(parsed);
-          if (chunk) fullText += chunk;
-
-          const parts = findMessageParts(parsed);
-          if (parts?.length) {
-            const joined = parts.join("");
-            if (joined.length >= latestFullText.length) {
-              latestFullText = joined;
-            }
-          }
-        } catch {
-          // ignore malformed SSE lines
         }
       }
-    }
 
-    const resolved = (fullText || latestFullText || extractJsonFromRawSse(rawSse)).trim();
-    return resolved;
+      return fullText.trim();
+    } catch (err) {
+      const partial = fullText.trim();
+      if (partial) return partial;
+      if (isRecoverableStreamError(err)) return "";
+      throw err;
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // ignore
+      }
+    }
   }
 
   function installFetchHook() {
@@ -464,20 +433,30 @@
       const response = await originalFetch(...args);
 
       if (isConversationUrl(url) && response.ok) {
+        const generation = window.__cApplyStreamCapture?.generation ?? streamCaptureGeneration;
         window.__cApplyStreamCapture.started = true;
         const clone = response.clone();
-        consumeConversationStream(clone)
+        consumeConversationStream(clone, generation)
           .then((text) => {
-            window.__cApplyStreamCapture.started = true;
-            if (!text?.trim()) return;
-            window.__cApplyStreamCapture.text = text.trim();
-            window.__cApplyStreamCapture.done = true;
-            notifyStreamWaiters();
+            markStreamCaptureDone(
+              text?.trim() || window.__cApplyStreamCapture.text || "",
+              null,
+              generation
+            );
           })
           .catch((err) => {
-            window.__cApplyStreamCapture.error = err.message || String(err);
-            window.__cApplyStreamCapture.done = true;
-            notifyStreamWaiters();
+            const cap = window.__cApplyStreamCapture || {};
+            if (cap.generation !== generation) return;
+            const partial = cap.text?.trim() || "";
+            if (partial) {
+              markStreamCaptureDone(partial, null, generation);
+              return;
+            }
+            if (isRecoverableStreamError(err)) {
+              markStreamCaptureDone("", null, generation);
+              return;
+            }
+            markStreamCaptureDone("", err.message || String(err), generation);
           });
       }
 
@@ -507,24 +486,12 @@
         this.addEventListener("load", () => {
           try {
             if (this.responseType === "" || this.responseType === "text") {
-              const raw = String(this.responseText || "").trim();
-              if (!raw) return;
-
-              consumeConversationStream(
-                new Response(raw, {
-                  headers: { "Content-Type": "text/event-stream" },
-                })
-              )
-                .then((text) => {
-                  if (!text) return;
-                  window.__cApplyStreamCapture.text = text;
-                  window.__cApplyStreamCapture.done = true;
-                  window.__cApplyStreamCapture.started = true;
-                  notifyStreamWaiters();
-                })
-                .catch(() => {
-                  // ignore
-                });
+              const text = String(this.responseText || "").trim();
+              if (text) {
+                window.__cApplyStreamCapture.text = text;
+                window.__cApplyStreamCapture.done = true;
+                window.__cApplyStreamCapture.started = true;
+              }
             }
           } catch {
             // ignore
@@ -554,10 +521,9 @@
 
   function getAssistantResponseText(assistantCountBefore) {
     const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-    const msg =
-      msgs.length > assistantCountBefore
-        ? msgs[msgs.length - 1]
-        : msgs[msgs.length - 1];
+    if (msgs.length <= assistantCountBefore) return "";
+
+    const msg = msgs[msgs.length - 1];
     if (!msg) return "";
 
     /** @type {string[]} */
@@ -572,20 +538,44 @@
       addCandidate(el.textContent);
     }
 
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const text = candidates[i];
-      if (
-        text.includes('"resume"') ||
+    const fullText = msg.innerText?.trim() || msg.textContent?.trim() || "";
+
+    let best = "";
+    let bestScore = 0;
+    /** @type {string[]} */
+    const resumeCandidates = [];
+    for (const text of candidates) {
+      const isResume =
         text.includes('"tailoredResume"') ||
-        text.includes('"contact"')
-      ) {
-        return text;
+        text.includes('"resume"') ||
+        text.includes('"contact"');
+      if (!isResume) continue;
+
+      resumeCandidates.push(text);
+      const score = (text.includes('"atsScore"') ? 1_000_000 : 0) + text.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = text;
       }
     }
 
+    const withAts = resumeCandidates.filter((text) => text.includes('"atsScore"'));
+    if (withAts.length) return withAts[withAts.length - 1];
+
+    if (best.includes('"atsScore"')) return best;
+
+    if (
+      fullText.includes('"tailoredResume"') &&
+      fullText.includes('"atsScore"')
+    ) {
+      const jsonStart = fullText.lastIndexOf("{");
+      if (jsonStart >= 0) return fullText.slice(jsonStart);
+    }
+
+    if (best) return best;
     if (candidates.length) return candidates[candidates.length - 1];
 
-    return msg.innerText?.trim() || msg.textContent?.trim() || "";
+    return fullText;
   }
 
   window.__cApplyResetStreamCapture = resetStreamCapture;
@@ -611,10 +601,32 @@
    * @param {string} prompt
    * @param {boolean} autoSend
    */
+  window.__cApplySubmitComposer = function () {
+    try {
+      spoofPageVisibility();
+
+      const editor = findEditor();
+      if (!editor) {
+        return { ok: false, error: "Composer not found on page." };
+      }
+
+      const assistantCountBefore = countAssistantMessages();
+      const submitted = submitComposer(editor);
+
+      if (!submitted.ok && !findSendButton()) {
+        return { ok: false, error: "Send button not found." };
+      }
+
+      return { ok: true, sent: true, assistantCountBefore };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  };
+
   window.__cApplyRunInjectSync = function (prompt, autoSend) {
     try {
       spoofPageVisibility();
-      resetStreamCapture();
+      if (autoSend) resetStreamCapture();
 
       const editor = findEditor();
       if (!editor) {
@@ -630,7 +642,7 @@
       const assistantCountBefore = countAssistantMessages();
       const submitted = submitComposer(editor);
 
-      if (!submitted && !findSendButton()) {
+      if (!submitted.ok && !findSendButton()) {
         return { ok: false, error: "Send button not found. Open a ChatGPT chat first." };
       }
 
@@ -651,34 +663,38 @@
     spoofPageVisibility();
 
     const stream = window.__cApplyPollStreamCapture();
-    if (stream.done && stream.text) {
+    const domText = getAssistantResponseText(assistantCountBefore);
+    const generating = stream.generating || isGenerating();
+
+    if (stream.text) {
       return {
-        generating: false,
+        generating,
         hasNew: true,
         textLength: stream.text.length,
         text: stream.text,
-        hasJson: stream.hasJson,
+        domText,
+        hasJson: stream.text.includes("{") || domText.includes("{"),
         fromStream: true,
         messageCount: countAssistantMessages(),
       };
     }
 
     if (stream.error) {
-      return { error: stream.error };
+      return { error: stream.error, domText, generating };
     }
 
     const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
     const hasNew = msgs.length > assistantCountBefore;
     const assistant = hasNew ? msgs[msgs.length - 1] : null;
-    const text = getAssistantResponseText(assistantCountBefore);
     const textLength = assistant?.innerText?.length || assistant?.textContent?.length || 0;
 
     return {
-      generating: stream.generating || isGenerating(),
+      generating,
       hasNew,
       textLength,
-      text: stream.text || text,
-      hasJson: (stream.text || text).includes("{"),
+      text: domText,
+      domText,
+      hasJson: domText.includes("{"),
       fromStream: false,
       messageCount: msgs.length,
     };
@@ -785,21 +801,10 @@
   }
 
   async function waitForStreamCapture(timeoutMs = 300000) {
-    const readCapturedText = () => {
-      const cap = window.__cApplyStreamCapture || {};
-      if (cap.text?.trim()) return cap.text.trim();
-
-      const poll = window.__cApplyPollChatGPTResponse?.(0);
-      if (poll?.text?.trim()) return poll.text.trim();
-
-      return "";
-    };
-
     const cap = window.__cApplyStreamCapture || {};
     if (cap.done) {
       if (cap.error) throw new Error(cap.error);
-      const text = readCapturedText();
-      if (text) return text;
+      if (cap.text?.trim()) return cap.text.trim();
       throw new Error("ChatGPT returned an empty response.");
     }
 
@@ -807,19 +812,16 @@
       const timer = setTimeout(() => {
         const idx = window.__cApplyStreamWaiters.indexOf(onDone);
         if (idx >= 0) window.__cApplyStreamWaiters.splice(idx, 1);
-        const lateText = readCapturedText();
-        if (lateText) resolve(lateText);
-        else reject(new Error("Timed out waiting for ChatGPT response."));
+        reject(new Error("Timed out waiting for ChatGPT response."));
       }, timeoutMs);
 
-      const onDone = () => {
+      const onDone = (result) => {
         clearTimeout(timer);
-        const capNow = window.__cApplyStreamCapture || {};
-        if (capNow.error) {
-          reject(new Error(capNow.error));
+        if (result.error) {
+          reject(new Error(result.error));
           return;
         }
-        const text = readCapturedText();
+        const text = result.text?.trim() || "";
         if (text) resolve(text);
         else reject(new Error("ChatGPT returned an empty response."));
       };
@@ -957,15 +959,12 @@
         return "";
       }
 
-      try {
-        return await sendViaBackendApi(prompt);
-      } catch (apiError) {
-        const uiResult = window.__cApplyRunInjectSync(prompt, true);
-        if (!uiResult.ok || !uiResult.sent) {
-          throw apiError;
-        }
-        return await waitForStreamCapture();
+      const uiResult = window.__cApplyRunInjectSync(prompt, true);
+      if (!uiResult.ok || !uiResult.sent) {
+        throw new Error(uiResult.error || "Could not send prompt to ChatGPT.");
       }
+
+      return await waitForStreamCapture();
     } finally {
       window.__cApplyStopKeepalive?.();
     }

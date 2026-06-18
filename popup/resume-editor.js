@@ -4,7 +4,6 @@ import {
   parseResumeText,
   serializeResume,
 } from "../lib/resume-structure.js";
-import { generateResumePdf } from "../lib/resume-pdf.js";
 
 /** @typedef {import("../lib/resume-structure.js").ResumeStructure} ResumeStructure */
 
@@ -25,88 +24,19 @@ export function createResumeEditor(container, options = {}) {
 
   /** @type {ResumeStructure} */
   let data = emptyResume();
-  let mode = "structured";
-  let previewUrl = null;
 
   const els = {
-    toolbar: document.createElement("div"),
     structured: document.createElement("div"),
-    preview: document.createElement("div"),
-    previewFrame: document.createElement("iframe"),
-    btnStructured: document.createElement("button"),
-    btnPreview: document.createElement("button"),
   };
 
   container.innerHTML = "";
   container.classList.add("resume-editor-root");
 
-  els.toolbar.className = "resume-view-toggle";
-  els.btnStructured.type = "button";
-  els.btnStructured.className = "view-btn active";
-  els.btnStructured.textContent = "Structured";
-  els.btnPreview.type = "button";
-  els.btnPreview.className = "view-btn";
-  els.btnPreview.textContent = "Preview as PDF";
-
   els.structured.className = "resume-structured";
-  els.preview.className = "resume-preview";
-  els.previewFrame.className = "resume-preview-frame";
-  els.previewFrame.title = "Resume PDF preview";
-
-  els.preview.append(els.previewFrame);
-
-  els.toolbar.append(els.btnStructured, els.btnPreview);
-  container.append(els.toolbar, els.structured, els.preview);
-  els.preview.hidden = true;
-
-  els.btnStructured.addEventListener("click", () => setMode("structured"));
-  els.btnPreview.addEventListener("click", () => setMode("preview"));
+  container.append(els.structured);
 
   function notifyChange() {
     options.onChange?.();
-  }
-
-  function revokePreviewUrl() {
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
-      previewUrl = null;
-    }
-  }
-
-  function refreshPreview() {
-    revokePreviewUrl();
-    const resume = readStructured();
-    const hasContent = Boolean(serializeResume(resume).trim());
-
-    if (!hasContent) {
-      els.previewFrame.removeAttribute("src");
-      return;
-    }
-
-    const blob = generateResumePdf(resume);
-    previewUrl = URL.createObjectURL(blob);
-    els.previewFrame.src = previewUrl;
-  }
-
-  function setMode(next) {
-    if (next === mode) {
-      if (next === "preview") refreshPreview();
-      return;
-    }
-
-    if (next === "structured" && mode === "preview") {
-      // keep structured data as source of truth
-    }
-
-    mode = next;
-    els.btnStructured.classList.toggle("active", mode === "structured");
-    els.btnPreview.classList.toggle("active", mode === "preview");
-    els.structured.hidden = mode !== "structured";
-    els.preview.hidden = mode !== "preview";
-    container.classList.toggle("preview-mode", mode === "preview");
-
-    if (mode === "preview") refreshPreview();
-    notifyChange();
   }
 
   function field(label, value, onInput, placeholder = "") {
@@ -153,8 +83,7 @@ export function createResumeEditor(container, options = {}) {
     return Boolean(
       edu.school?.trim() ||
         edu.degree?.trim() ||
-        edu.dates?.trim() ||
-        edu.details?.trim()
+        edu.dates?.trim()
     );
   }
 
@@ -461,12 +390,6 @@ export function createResumeEditor(container, options = {}) {
         );
         cardBody.appendChild(row);
         cardBody.appendChild(
-          textArea("Details", edu.details, (v) => {
-            edu.details = v;
-            notifyChange();
-          }, 2)
-        );
-        cardBody.appendChild(
           addBtn("Remove education", () => {
             data.education = data.education.filter((e) => e.id !== edu.id);
             renderEducation();
@@ -490,7 +413,6 @@ export function createResumeEditor(container, options = {}) {
             school: "",
             degree: "",
             dates: "",
-            details: "",
           });
           renderEducation();
           notifyChange();
@@ -521,13 +443,11 @@ export function createResumeEditor(container, options = {}) {
     setText(text, options = {}) {
       data = parseResumeText(text);
       renderStructured();
-      if (mode === "preview") refreshPreview();
       if (!options.silent) notifyChange();
     },
     setStructured(structured, options = {}) {
       data = normalizeResume(structured);
       renderStructured();
-      if (mode === "preview") refreshPreview();
       if (!options.silent) notifyChange();
     },
     getText() {
@@ -536,11 +456,6 @@ export function createResumeEditor(container, options = {}) {
     getStructured() {
       return readStructured();
     },
-    getMode() {
-      return mode;
-    },
-    destroy() {
-      revokePreviewUrl();
-    },
+    destroy() {},
   };
 }
