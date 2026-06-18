@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "cApply — Resume Tailor for ChatGPT",
-  "version": "1.0.2",
+  "version": "1.2.3",
   "description": "Tailor your resume to any job description using ChatGPT web app.",
   "permissions": ["storage", "activeTab", "scripting", "tabs", "sidePanel"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
@@ -27,7 +28,7 @@
     {
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["content/chatgpt-bridge.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [

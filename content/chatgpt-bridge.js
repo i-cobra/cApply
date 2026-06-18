@@ -1,18 +1,21 @@
 /**
- * Content script bridge — injects page script and relays messages.
+ * Content script — injects page-world API early (document_start).
  */
-
 (function initBridge() {
   if (window.__cApplyBridgeLoaded) return;
   window.__cApplyBridgeLoaded = true;
 
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("content/page-inject.js");
-  script.onload = () => script.remove();
-  (document.head || document.documentElement).appendChild(script);
+  function injectScript(file) {
+    const script = document.createElement("script");
+    script.src = chrome.runtime.getURL(file);
+    script.async = false;
+    (document.documentElement || document.head).appendChild(script);
+  }
+
+  injectScript("content/chatgpt-inject-page.js");
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message.type !== "INJECT_PROMPT") return;
+    if (message.type !== "INJECT_PROMPT") return false;
 
     const requestId = `capply-${Date.now()}`;
 

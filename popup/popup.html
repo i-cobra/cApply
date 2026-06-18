@@ -10,24 +10,127 @@
   <header>
     <h1>cApply</h1>
     <p class="subtitle">Tailor your resume with ChatGPT</p>
+    <nav class="main-tabs" role="tablist" aria-label="Main sections">
+      <button type="button" class="main-tab active" role="tab" id="tab-application" aria-selected="true" aria-controls="panel-application" data-tab="application">Application</button>
+      <button type="button" class="main-tab" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history" data-tab="history">History</button>
+      <button type="button" class="main-tab" role="tab" id="tab-analysis" aria-selected="false" aria-controls="panel-analysis" data-tab="analysis">Analysis</button>
+      <button type="button" class="main-tab" role="tab" id="tab-profile" aria-selected="false" aria-controls="panel-profile" data-tab="profile">Profile</button>
+    </nav>
   </header>
 
-  <main>
-    <section class="field">
-      <div class="field-header">
-        <label for="resume">Your resume</label>
-        <button type="button" id="loadResumeFile" class="link-btn">Upload file</button>
-        <input type="file" id="resumeFile" accept=".txt,.md,.pdf" hidden />
-      </div>
-      <textarea id="resume" rows="6" placeholder="Paste your resume here, or upload a .txt, .md, or .pdf file…"></textarea>
+  <main id="panel-profile" class="tab-panel" role="tabpanel" aria-labelledby="tab-profile" hidden>
+    <section class="field profile-fill-field">
+      <label for="profileSourceText">Resume source</label>
+      <p class="field-hint">Paste resume text or click Import from PDF to choose a .txt, .md, or .pdf file.</p>
+      <textarea id="profileSourceText" rows="5" placeholder="Paste resume text here…"></textarea>
+      <label class="full-width profile-fill-instructions">
+        Extra instructions (optional)
+        <input type="text" id="profileFillInstructions" placeholder="e.g. Emphasize leadership roles" />
+      </label>
+      <input type="file" id="profileFile" accept=".txt,.md,.pdf" hidden />
+      <button type="button" id="fillProfileBtn" class="primary profile-fill-btn" data-default-label="Import from PDF">
+        Import from PDF
+      </button>
     </section>
 
-    <section class="field">
+    <section class="field resume-field-wrap">
+      <div class="field-header">
+        <label>Basic resume</label>
+        <div class="field-actions">
+          <button type="button" id="clearProfile" class="link-btn">Clear</button>
+        </div>
+      </div>
+      <p class="field-hint">Your master resume. Tailoring uses a copy and never changes this.</p>
+      <div id="profileResumeEditor"></div>
+    </section>
+
+    <footer class="tab-footer">
+      <button type="button" id="saveProfile" class="ghost-btn">Save profile</button>
+    </footer>
+    <p id="profileStatus" class="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <main id="panel-application" class="tab-panel active" role="tabpanel" aria-labelledby="tab-application">
+    <section class="field job-field">
+      <div class="application-meta-grid">
+        <label>
+          Job URL
+          <input type="url" id="jobUrl" placeholder="https://…" inputmode="url" autocomplete="url" />
+        </label>
+        <label>
+          Company name
+          <input type="text" id="companyName" placeholder="e.g. Acme Inc" />
+        </label>
+      </div>
+
       <div class="field-header">
         <label for="jobDescription">Job description</label>
         <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
       </div>
       <textarea id="jobDescription" rows="6" placeholder="Paste the job posting here…"></textarea>
+
+      <section class="field profile-source">
+        <div class="field-header">
+          <label>Resume source</label>
+          <button type="button" id="goToProfile" class="link-btn">Edit in Profile</button>
+        </div>
+        <p id="profileSourceSummary" class="profile-source-summary">Loading profile…</p>
+      </section>
+
+      <div class="application-actions">
+        <button
+          type="button"
+          id="tailorBtn"
+          class="primary"
+          data-tailor-label="Tailor"
+          data-download-label="Download resume"
+        >
+          Tailor
+        </button>
+        <button type="button" id="retailorBtn" class="link-btn application-retailor" hidden>
+          Re-tailor
+        </button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="atsScoreSection" class="field ats-score-section" hidden>
+      <div class="field-header">
+        <label>ATS score</label>
+        <span id="atsResumeSource" class="ats-source-badge">Profile resume</span>
+      </div>
+      <div class="ats-score-card">
+        <div
+          id="atsScoreRing"
+          class="ats-score-ring"
+          role="img"
+          aria-label="ATS match score"
+        >
+          <span id="atsScoreValue" class="ats-score-value">—</span>
+          <span class="ats-score-unit">%</span>
+        </div>
+        <div class="ats-score-details">
+          <p id="atsScoreSummary" class="ats-score-summary"></p>
+          <details id="atsMissingDetails" class="ats-keyword-details">
+            <summary>Missing keywords (<span id="atsMissingCount">0</span>)</summary>
+            <ul id="atsMissingList" class="ats-keyword-list"></ul>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section id="tailoredResumeSection" class="field resume-field-wrap tailored-resume-section" hidden>
+      <div class="field-header">
+        <label>Tailored resume</label>
+      </div>
+      <div id="tailoredChangesWrap" class="tailored-changes-wrap" hidden>
+        <p class="tailored-changes-title">Changes made</p>
+        <ul id="tailoredChangesList" class="tailored-changes-list"></ul>
+      </div>
+      <div id="tailoredResumeEditor"></div>
+      <footer class="tab-footer">
+        <button type="button" id="saveTailoredResume" class="ghost-btn">Save tailored resume</button>
+      </footer>
     </section>
 
     <details class="options">
@@ -60,18 +163,27 @@
         <input type="text" id="extraInstructions" placeholder="e.g. Keep to one page, emphasize Python experience" />
       </label>
     </details>
-
-    <button type="button" id="tailorBtn" class="primary">
-      Tailor with ChatGPT
-    </button>
-
-    <p id="status" class="status" role="status" aria-live="polite"></p>
   </main>
 
-  <footer>
-    <button type="button" id="saveResume" class="ghost-btn">Save resume locally</button>
-  </footer>
+  <main id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <section class="history-panel">
+      <div class="field-header">
+        <label>Tailor history</label>
+        <button type="button" id="clearHistory" class="link-btn" hidden>Clear all</button>
+      </div>
+      <p id="historyEmpty" class="field-hint">No tailor sessions yet. Tailor a resume on the Application tab.</p>
+      <ul id="historyList" class="history-list"></ul>
+    </section>
+  </main>
 
+  <main id="panel-analysis" class="tab-panel" role="tabpanel" aria-labelledby="tab-analysis" hidden>
+    <section class="tab-placeholder">
+      <p class="placeholder-title">Analysis</p>
+      <p class="placeholder-text">Resume and job match insights will appear here.</p>
+    </section>
+  </main>
+
+  <script src="../lib/jspdf/jspdf.umd.min.js"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>
