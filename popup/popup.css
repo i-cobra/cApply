@@ -28,11 +28,16 @@ body {
   font-size: 13px;
   color: var(--text);
   background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
 }
 
 header {
   padding: 16px 16px 8px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 h1 {
@@ -116,6 +121,43 @@ main {
   gap: 12px;
 }
 
+.tab-panel:not([hidden]) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tab-panel-fill:not([hidden]) {
+  overflow: hidden;
+}
+
+.tab-panel-fill .profile-import-field,
+.tab-panel-fill #profileStatus {
+  flex-shrink: 0;
+}
+
+.tab-panel-fill .resume-field-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-panel-fill #profileResumeEditor,
+.tab-panel-fill .resume-editor-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-panel-fill .resume-structured {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
 .field-hint {
   margin: 0 0 8px;
   font-size: 11px;
@@ -197,34 +239,6 @@ main {
   font-size: 12px;
   color: var(--text);
   line-height: 1.45;
-}
-
-.ats-keyword-details {
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.ats-keyword-details summary {
-  cursor: pointer;
-  user-select: none;
-}
-
-.ats-keyword-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ats-keyword-list li {
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
-  color: var(--text);
-  font-size: 10px;
-  line-height: 1.3;
 }
 
 .tailored-resume-section {
@@ -460,7 +474,7 @@ main {
 
 .application-meta-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 10px;
 }

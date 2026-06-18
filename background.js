@@ -1,6 +1,10 @@
 import { buildFillProfilePrompt, buildTailorPrompt } from "./lib/prompt.js";
 import { parseTailorResponse } from "./lib/tailor-response.js";
 import { serializeResume } from "./lib/resume-structure.js";
+import { encodeResumePdfBase64 } from "./lib/resume-pdf.js";
+import { loadJobContext, SHARED_CONTEXT_KEY } from "./lib/job-context.js";
+import { inferJobRole } from "./lib/tailor-history.js";
+import "./lib/jspdf/jspdf.umd.min.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
 const CHATGPT_HOSTS = ["chatgpt.com", "chat.openai.com"];
@@ -26,33 +30,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   enableSidePanelForAllTabs();
 });
-
-/** @type {Map<string, string>} */
-const resumePreviewCache = new Map();
-
-const PREVIEW_CACHE_TTL_MS = 5 * 60 * 1000;
-
-function storeResumePreview(base64) {
-  const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-  resumePreviewCache.set(id, base64);
-  globalThis.setTimeout(() => {
-    resumePreviewCache.delete(id);
-  }, PREVIEW_CACHE_TTL_MS);
-  return id;
-}
-
-async function openResumePreviewTab(id, label = "") {
-  const previewUrl = new URL(chrome.runtime.getURL("preview/resume-preview.html"));
-  previewUrl.searchParams.set("id", id);
-  if (label) {
-    previewUrl.searchParams.set("title", label);
-  }
-
-  await chrome.tabs.create({
-    url: previewUrl.toString(),
-    active: true,
-  });
-}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "TAILOR_RESUME") {
@@ -83,35 +60,85 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "PREVIEW_RESUME") {
-    handlePreviewResume(message)
+  if (message.type === "PREVIEW_RESUME_ON_PAGE") {
+    handlePreviewResumeOnPage(message)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
-  if (message.type === "GET_RESUME_PREVIEW") {
-    const base64 = resumePreviewCache.get(message.id);
-    if (!base64) {
-      sendResponse({ ok: false, error: "Preview expired or not found." });
-      return false;
-    }
-    resumePreviewCache.delete(message.id);
-    sendResponse({ ok: true, base64 });
-    return false;
+  if (message.type === "REFRESH_RESUME_PREVIEW") {
+    handleRefreshResumePreview()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
   }
 });
 
-async function handlePreviewResume(message) {
+async function handlePreviewResumeOnPage(message) {
   const base64 = message.base64;
   if (!base64 || typeof base64 !== "string") {
     throw new Error("Missing resume preview data.");
   }
 
-  const id = storeResumePreview(base64);
   const title = typeof message.title === "string" ? message.title.trim() : "";
-  await openResumePreviewTab(id, title);
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabId = tab?.id;
+  const url = tab?.url || "";
+
+  if (!tabId) {
+    throw new Error("No active browser tab. Open a web page first.");
+  }
+
+  if (
+    url.startsWith("chrome://") ||
+    url.startsWith("chrome-extension://") ||
+    url.startsWith("edge://") ||
+    url.startsWith("about:")
+  ) {
+    throw new Error("Open a regular web page in the browser, then preview again.");
+  }
+
+  const hasAccess = await chrome.permissions.contains({
+    origins: ["https://*/*", "http://*/*"],
+  });
+
+  if (!hasAccess) {
+    throw new Error(
+      "Page access not granted. Click Preview resume again and allow permission."
+    );
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content/resume-preview-modal.js"],
+  });
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (pdfBase64, previewTitle) => {
+      window.__cApplyShowResumePreviewModal?.(pdfBase64, previewTitle);
+    },
+    args: [base64, title || "Resume preview"],
+  });
+
   return { ok: true };
+}
+
+async function handleRefreshResumePreview() {
+  const state = await loadJobContext(SHARED_CONTEXT_KEY);
+  const structured = state?.structured;
+
+  if (!structured || !serializeResume(structured).trim()) {
+    throw new Error("No tailored resume to preview.");
+  }
+
+  const name = structured.contact?.name?.trim() || "Resume";
+  const role = state?.position?.trim() || inferJobRole(state?.jobDescription || "");
+  const title = role ? `${name} — ${role}` : name;
+  const base64 = await encodeResumePdfBase64(structured);
+
+  return { ok: true, base64, title };
 }
 
 async function handleGrabPageText() {
@@ -279,9 +306,17 @@ function pickCaptureText(capture) {
   const hasNew = Boolean(capture.hasNewAssistant);
   const inFlight = Boolean(capture.generating || capture.streamStarted);
 
-  if (!hasNew && !inFlight) return "";
+  if (!hasNew && !inFlight) {
+    if (hasTailorResumeMarkers(dom) && dom.length > 80) return dom;
+    if (hasTailorResumeMarkers(stream) && stream.length > 80) return stream;
+    return "";
+  }
 
   if (inFlight && !hasNew) return stream;
+
+  if (dom.includes('"tailoredResume"') && dom.length > 200) {
+    return dom;
+  }
 
   if (
     dom.includes('"tailoredResume"') &&
@@ -417,6 +452,8 @@ async function pollCapture(tabId, assistantCountBefore = 0) {
 async function runPromptWithPolling(tabId, prompt) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 
+  const stopKeepalive = startBackgroundKeepalive();
+
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -454,6 +491,7 @@ async function runPromptWithPolling(tabId, prompt) {
 
     throw new Error(lastError);
   } finally {
+    stopKeepalive();
     await chrome.scripting
       .executeScript({
         target: { tabId },
@@ -475,13 +513,30 @@ function isRecoverableStreamCaptureError(message) {
 }
 
 function isUsableTailorResponse(text) {
-  if (!text?.trim() || !hasAtsScoreProperty(text)) return false;
+  if (!text?.trim() || !hasTailorResumeMarkers(text) || text.length <= 80) return false;
   try {
-    const { structured, atsScore } = parseTailorResponse(text);
-    return Boolean(serializeResume(structured).trim()) && Boolean(atsScore);
+    const { structured } = parseTailorResponse(text);
+    return Boolean(serializeResume(structured).trim());
   } catch {
     return false;
   }
+}
+
+function responseLooksComplete(text) {
+  if (!text?.trim()) return false;
+  if (hasAtsScoreProperty(text) && hasBalancedJsonBraces(text)) return true;
+  return hasBalancedJsonBraces(text) && text.includes('"tailoredResume"');
+}
+
+function stableRoundsNeeded(text) {
+  return responseLooksComplete(text) ? 1 : 2;
+}
+
+function startBackgroundKeepalive() {
+  const timer = setInterval(() => {
+    chrome.runtime.getPlatformInfo?.().catch(() => {});
+  }, 20_000);
+  return () => clearInterval(timer);
 }
 
 async function waitForCapturedResponse(tabId, assistantCountBefore) {
@@ -491,14 +546,6 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
 
   while (Date.now() < deadline) {
     const capture = await pollCapture(tabId, assistantCountBefore);
-
-    if (capture.generating) {
-      stableRounds = 0;
-      lastText = "";
-      await sleep(500);
-      continue;
-    }
-
     const candidate = pickCaptureText(capture);
 
     if (
@@ -509,23 +556,9 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
       throw new Error(capture.streamError);
     }
 
-    if (!candidate) {
+    if (!candidate || !hasTailorResumeMarkers(candidate) || candidate.length <= 80) {
       stableRounds = 0;
-      lastText = "";
-      await sleep(500);
-      continue;
-    }
-
-    if (!hasTailorResumeMarkers(candidate) || candidate.length <= 80) {
-      stableRounds = 0;
-      lastText = candidate;
-      await sleep(500);
-      continue;
-    }
-
-    if (!hasAtsScoreProperty(candidate)) {
-      stableRounds = 0;
-      lastText = candidate;
+      lastText = candidate || "";
       await sleep(500);
       continue;
     }
@@ -537,7 +570,10 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
       lastText = candidate;
     }
 
-    if (stableRounds >= 2 && isUsableTailorResponse(candidate)) {
+    const ready =
+      stableRounds >= stableRoundsNeeded(candidate) && isUsableTailorResponse(candidate);
+
+    if (ready && (!capture.generating || responseLooksComplete(candidate))) {
       return candidate;
     }
 
@@ -545,8 +581,6 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
   }
 
   const finalCapture = await pollCapture(tabId, assistantCountBefore);
-  if (finalCapture.generating) return "";
-
   const final = pickCaptureText(finalCapture) || lastText?.trim() || "";
   return isUsableTailorResponse(final) ? final : "";
 }

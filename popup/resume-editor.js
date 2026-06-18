@@ -74,6 +74,7 @@ export function createResumeEditor(container, options = {}) {
     return Boolean(
       job.title?.trim() ||
         job.company?.trim() ||
+        job.location?.trim() ||
         job.dates?.trim() ||
         job.bullets?.some((b) => b.trim())
     );
@@ -102,7 +103,12 @@ export function createResumeEditor(container, options = {}) {
       case "experience": {
         const jobs = data.experience.filter(hasExperienceContent);
         if (!jobs.length) return "No roles yet";
-        const first = entrySummary(jobs[0].title, jobs[0].company, jobs[0].dates);
+        const first = entrySummary(
+          jobs[0].title,
+          jobs[0].company,
+          jobs[0].dates,
+          jobs[0].location
+        );
         return jobs.length > 1 ? `${jobs.length} roles · ${truncate(first, 36)}` : truncate(first);
       }
       case "education": {
@@ -193,14 +199,18 @@ export function createResumeEditor(container, options = {}) {
     return details;
   }
 
-  function entrySummary(title, company, dates) {
+  function entrySummary(title, company, dates, location) {
     const parts = [];
     const t = title?.trim() || "";
     const c = company?.trim() || "";
+    const l = location?.trim() || "";
     const d = dates?.trim() || "";
 
     if (t) parts.push(t);
     if (c && !t.toLowerCase().includes(c.toLowerCase())) parts.push(c);
+    if (l && !parts.some((part) => part.toLowerCase().includes(l.toLowerCase()))) {
+      parts.push(l);
+    }
     if (d && !t.includes(d)) parts.push(d);
 
     return parts.join(" · ") || "New entry";
@@ -288,6 +298,10 @@ export function createResumeEditor(container, options = {}) {
             job.company = v;
             notifyChange();
           }, "Acme Inc."),
+          field("Location", job.location, (v) => {
+            job.location = v;
+            notifyChange();
+          }, "San Francisco, CA"),
           field("Dates", job.dates, (v) => {
             job.dates = v;
             notifyChange();
@@ -341,7 +355,7 @@ export function createResumeEditor(container, options = {}) {
         expWrap.appendChild(
           collapsibleEntry(
             `exp-${job.id}`,
-            entrySummary(job.title, job.company, job.dates),
+            entrySummary(job.title, job.company, job.dates, job.location),
             cardBody,
             openSections[`exp-${job.id}`] ?? visibleJobs.length === 1
           )
@@ -353,6 +367,7 @@ export function createResumeEditor(container, options = {}) {
             id: `r-${Date.now()}`,
             title: "",
             company: "",
+            location: "",
             dates: "",
             bullets: [""],
           });

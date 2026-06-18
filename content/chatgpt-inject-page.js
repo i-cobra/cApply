@@ -505,6 +505,9 @@
   installFetchHook();
 
   function isGenerating() {
+    const cap = window.__cApplyStreamCapture;
+    if (cap?.started && !cap?.done && !cap?.error) return true;
+
     const stopBtn = document.querySelector('[data-testid="stop-button"]');
     if (stopBtn && isPresent(stopBtn) && !stopBtn.disabled) return true;
 

@@ -18,7 +18,7 @@
     </nav>
   </header>
 
-  <main id="panel-profile" class="tab-panel" role="tabpanel" aria-labelledby="tab-profile" hidden>
+  <main id="panel-profile" class="tab-panel tab-panel-fill" role="tabpanel" aria-labelledby="tab-profile" hidden>
     <section class="field profile-import-field">
       <input type="file" id="profileFile" accept=".txt,.md,.pdf" hidden />
       <div class="profile-actions">
@@ -49,6 +49,10 @@
         <label>
           Job URL
           <input type="url" id="jobUrl" placeholder="https://…" inputmode="url" autocomplete="url" />
+        </label>
+        <label>
+          Position
+          <input type="text" id="position" placeholder="e.g. Senior Developer" />
         </label>
         <label>
           Company name
@@ -133,10 +137,6 @@
           </div>
           <div class="ats-score-details">
             <p id="atsScoreSummary" class="ats-score-summary"></p>
-            <details id="atsMissingDetails" class="ats-keyword-details">
-              <summary>Missing keywords (<span id="atsMissingCount">0</span>)</summary>
-              <ul id="atsMissingList" class="ats-keyword-list"></ul>
-            </details>
           </div>
         </div>
       </section>

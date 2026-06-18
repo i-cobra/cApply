@@ -7,6 +7,7 @@ import {
   formatHistoryDate,
   inferJobRole,
   loadTailorHistory,
+  normalizeJobRoleTitle,
   removeTailorHistoryEntry,
 } from "../lib/tailor-history.js";
 import {
@@ -18,12 +19,12 @@ import {
 import {
   buildResumeDownloadFilename,
   downloadResumePdf,
-  previewResumePdf,
+  encodeResumePdfBase64,
 } from "../lib/resume-pdf.js";
 import { parseTailorResponse, normalizeAtsScoreResult } from "../lib/tailor-response.js";
 import {
-  analyzeJobCoreSkills,
-  ensureCoreSkillsInTailoredResume,
+  buildDisplayAtsScore,
+  ensureTailoredResumeCoverage,
 } from "../lib/job-core-skills.js";
 import { createResumeEditor } from "./resume-editor.js";
 
@@ -63,6 +64,7 @@ const els = {
   tailoredResumeEditor: document.getElementById("tailoredResumeEditor"),
   jobDescription: document.getElementById("jobDescription"),
   companyName: document.getElementById("companyName"),
+  position: document.getElementById("position"),
   jobUrl: document.getElementById("jobUrl"),
   tone: document.getElementById("tone"),
   outputFormat: document.getElementById("outputFormat"),
@@ -85,9 +87,6 @@ const els = {
   atsScoreValue: document.getElementById("atsScoreValue"),
   atsScoreSummary: document.getElementById("atsScoreSummary"),
   atsResumeSource: document.getElementById("atsResumeSource"),
-  atsMissingCount: document.getElementById("atsMissingCount"),
-  atsMissingList: document.getElementById("atsMissingList"),
-  atsMissingDetails: document.getElementById("atsMissingDetails"),
   historyList: document.getElementById("historyList"),
   historyEmpty: document.getElementById("historyEmpty"),
   historySearch: document.getElementById("historySearch"),
@@ -131,6 +130,27 @@ let tailoredResumeReady = false;
  */
 let tailorSession = null;
 
+const TAILOR_TIMEOUT_MS = 320_000;
+
+/**
+ * @param {unknown} message
+ * @param {number} [timeoutMs]
+ */
+function sendBackgroundMessage(message, timeoutMs = TAILOR_TIMEOUT_MS) {
+  return Promise.race([
+    chrome.runtime.sendMessage(message),
+    new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(
+          new Error(
+            "Tailoring timed out. Check the ChatGPT tab — if the JSON response is ready, click Re-tailor."
+          )
+        );
+      }, timeoutMs);
+    }),
+  ]);
+}
+
 init();
 
 async function init() {
@@ -167,6 +187,7 @@ async function init() {
   els.fillProfileBtn.addEventListener("click", onFillProfile);
   els.jobDescription.addEventListener("input", onApplicationInput);
   els.companyName.addEventListener("input", scheduleJobContextSave);
+  els.position.addEventListener("input", scheduleJobContextSave);
   els.jobUrl.addEventListener("input", scheduleJobContextSave);
   els.clearHistory.addEventListener("click", onClearHistory);
   els.historyList.addEventListener("click", onHistoryListClick);
@@ -222,6 +243,7 @@ async function migrateLegacyApplicationState(contextKey) {
     existing?.resumeText?.trim() ||
     existing?.jobDescription?.trim() ||
     existing?.companyName?.trim() ||
+    existing?.position?.trim() ||
     existing?.jobUrl?.trim()
   ) {
     return;
@@ -249,6 +271,7 @@ function collectApplicationState() {
   return {
     jobDescription: els.jobDescription.value,
     companyName: els.companyName.value.trim(),
+    position: els.position.value.trim(),
     jobUrl: els.jobUrl.value.trim(),
     resumeText: hasTailored ? resumeText : "",
     structured: hasTailored ? structured : null,
@@ -263,6 +286,7 @@ function collectApplicationState() {
 function applyApplicationState(state) {
   els.jobDescription.value = state?.jobDescription ?? "";
   els.companyName.value = state?.companyName ?? "";
+  els.position.value = state?.position ?? "";
   els.jobUrl.value = state?.jobUrl ?? "";
   latestTailorChanges = state?.changes ?? [];
   latestAtsFromAi = state?.atsScore ?? null;
@@ -313,7 +337,11 @@ function getTailorActionLabel() {
 }
 
 function updateApplicationActionButton() {
-  if (tailoredResumeReady && !hasResumeContent(tailoredEditor.getStructured())) {
+  if (
+    !tailorInProgress &&
+    tailoredResumeReady &&
+    !hasResumeContent(tailoredEditor.getStructured())
+  ) {
     tailoredResumeReady = false;
   }
 
@@ -336,6 +364,12 @@ function updateApplicationActionButton() {
   updateAtsScore();
 }
 
+function getApplicationPosition() {
+  return normalizeJobRoleTitle(
+    els.position.value.trim() || inferJobRole(els.jobDescription.value)
+  );
+}
+
 function onDownloadTailoredResume() {
   const structured = tailoredEditor.getStructured();
   const resumeText = tailoredEditor.getText().trim();
@@ -347,7 +381,7 @@ function onDownloadTailoredResume() {
   }
 
   const name = structured.contact.name?.trim() || "resume";
-  const role = inferJobRole(els.jobDescription.value);
+  const role = getApplicationPosition();
   const filename = buildResumeDownloadFilename(name, role);
 
   downloadResumePdf(structured, filename);
@@ -364,12 +398,31 @@ async function onPreviewTailoredResume() {
     return;
   }
 
-  const title = structured.contact.name?.trim() || "Resume";
+  const name = structured.contact.name?.trim() || "Resume";
+  const role = getApplicationPosition();
+  const title = role ? `${name} — ${role}` : name;
 
   try {
     els.previewResumeBtn.disabled = true;
-    await previewResumePdf(structured, title);
-    setStatus("Resume preview opened in a new tab.", "success");
+    await ensurePageAccess();
+    const base64 = await encodeResumePdfBase64(structured);
+    const response = await chrome.runtime.sendMessage({
+      type: "PREVIEW_RESUME_ON_PAGE",
+      base64,
+      title,
+    });
+
+    if (response === undefined) {
+      throw new Error(
+        "Lost connection to the extension background. Reload cApply in chrome://extensions and try again."
+      );
+    }
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not open resume preview.");
+    }
+
+    setStatus("Resume preview opened on the current page.", "success");
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
@@ -385,6 +438,7 @@ async function onNewApplication() {
 
   els.jobDescription.value = "";
   els.companyName.value = "";
+  els.position.value = "";
   els.jobUrl.value = "";
   resetTailoredApplicationUi();
   setStatus("");
@@ -393,6 +447,7 @@ async function onNewApplication() {
   await saveJobContext(activeJobContextKey, {
     jobDescription: "",
     companyName: "",
+    position: "",
     jobUrl: "",
     resumeText: "",
     structured: null,
@@ -497,41 +552,33 @@ function scheduleAtsScoreUpdate() {
   atsUpdateTimer = window.setTimeout(updateAtsScore, 250);
 }
 
-function renderAtsKeywordList(listEl, keywords) {
-  listEl.innerHTML = "";
-  for (const keyword of keywords) {
-    const item = document.createElement("li");
-    item.textContent = keyword;
-    listEl.appendChild(item);
-  }
-}
-
 function normalizeDisplayAtsScore(value) {
   return normalizeAtsScoreResult(value);
 }
 
 function updateAtsScore() {
-  if (tailorInProgress || !hasTailoredResume()) {
+  const hasResume =
+    hasTailoredResume() || hasResumeContent(tailoredEditor.getStructured());
+
+  if (!hasResume) {
     els.atsScoreSection.hidden = true;
     return;
   }
 
-  els.atsScoreSection.hidden = false;
-
   const atsScore = normalizeDisplayAtsScore(latestAtsFromAi);
-  if (!atsScore) {
+
+  if (!atsScore || atsScore.score == null) {
+    els.atsScoreSection.hidden = tailorInProgress;
     els.atsResumeSource.textContent = "ChatGPT";
     els.atsScoreValue.textContent = "—";
     els.atsScoreRing.className = "ats-score-ring";
     els.atsScoreRing.setAttribute("aria-label", "ATS match score unavailable");
     els.atsScoreSummary.textContent =
       "No ATS score was returned. Try re-tailoring this job.";
-    els.atsMissingDetails.hidden = true;
     return;
   }
 
   const tier = scoreTier(atsScore.score);
-  const missingKeywords = atsScore.missingKeywords ?? [];
 
   els.atsResumeSource.textContent = "ChatGPT";
   els.atsScoreValue.textContent = String(atsScore.score);
@@ -543,9 +590,7 @@ function updateAtsScore() {
   els.atsScoreSummary.textContent =
     atsScore.summary ||
     `ChatGPT estimates ${atsScore.score}% ATS match for this tailored resume.`;
-  els.atsMissingCount.textContent = String(missingKeywords.length);
-  renderAtsKeywordList(els.atsMissingList, missingKeywords);
-  els.atsMissingDetails.hidden = missingKeywords.length === 0;
+  els.atsScoreSection.hidden = tailorInProgress;
 }
 
 function showTailoredResume(structured, changes = [], atsScore) {
@@ -577,6 +622,7 @@ async function persistProfile() {
 async function openHistoryEntry(entry) {
   els.jobDescription.value = entry.jobDescription;
   els.companyName.value = entry.companyName || "";
+  els.position.value = entry.position?.trim() || historyEntryPosition(entry);
   els.jobUrl.value = entry.jobUrl || "";
   showTailoredResume(entry.structured, entry.changes, entry.atsScore);
   await persistJobContext();
@@ -625,6 +671,8 @@ function historyCompanyLogoHue(companyName) {
  * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
  */
 function historyEntryPosition(entry) {
+  if (entry.position?.trim()) return entry.position.trim();
+
   const role = inferJobRole(entry.jobDescription);
   if (role) return role;
 
@@ -651,8 +699,15 @@ function matchesHistorySearch(entry, companyQuery, positionQuery) {
   if (positionQuery) {
     const query = positionQuery.toLowerCase();
     const position = historyEntryPosition(entry).toLowerCase();
+    const storedPosition = (entry.position || "").toLowerCase();
     const title = (entry.title || "").toLowerCase();
-    if (!position.includes(query) && !title.includes(query)) return false;
+    if (
+      !position.includes(query) &&
+      !storedPosition.includes(query) &&
+      !title.includes(query)
+    ) {
+      return false;
+    }
   }
 
   return true;
@@ -726,10 +781,18 @@ async function renderHistory() {
 
     const title = document.createElement("p");
     title.className = "history-title";
-    title.textContent = entry.title;
+    const position = historyEntryPosition(entry);
+    const company = historyEntryCompanyName(entry);
 
-    if (entry.companyName?.trim() && !entry.title.includes(entry.companyName.trim())) {
-      title.textContent = `${entry.companyName.trim()} · ${entry.title}`;
+    if (company && position) {
+      title.textContent = `${company} · ${position}`;
+    } else if (entry.title?.trim()) {
+      title.textContent = entry.title;
+      if (company && !entry.title.includes(company)) {
+        title.textContent = `${company} · ${entry.title}`;
+      }
+    } else {
+      title.textContent = position || company || "Tailored application";
     }
 
     const preview = document.createElement("p");
@@ -828,6 +891,7 @@ async function recordTailorHistory({
   changes,
   atsScore,
   companyName,
+  position,
   jobUrl,
 }) {
   const resumeText = serializeResume(structured);
@@ -836,6 +900,7 @@ async function recordTailorHistory({
   await addTailorHistoryEntry({
     jobDescription,
     companyName,
+    position,
     jobUrl,
     resumeText,
     structured,
@@ -1009,6 +1074,9 @@ function setTailorBusy(busy) {
   if (hasTailoredResume()) {
     els.tailoredResumeSection.hidden = false;
   }
+  if (normalizeDisplayAtsScore(latestAtsFromAi)?.score != null) {
+    els.atsScoreSection.hidden = false;
+  }
   updateApplicationActionButton();
 }
 
@@ -1052,7 +1120,7 @@ async function onTailor() {
   }
 
   try {
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendBackgroundMessage({
       type: "TAILOR_RESUME",
       payload: {
         resume,
@@ -1064,6 +1132,7 @@ async function onTailor() {
           outputFormat: els.outputFormat.value,
           emphasize: ["keywords", "achievements", "ats", "skills", "summary"],
           extraInstructions: els.extraInstructions.value.trim(),
+          targetRole: getApplicationPosition(),
         },
       },
     });
@@ -1085,13 +1154,15 @@ async function onTailor() {
           "ChatGPT finished but no usable resume JSON was captured. Check the ChatGPT tab and try again."
         );
       }
-      const { coreSkills } = analyzeJobCoreSkills(jobDescription);
-      const enriched = ensureCoreSkillsInTailoredResume(
+      const enriched = ensureTailoredResumeCoverage(
         structured,
-        coreSkills,
-        resume
+        jobDescription,
+        resume,
+        atsScore?.missingKeywords ?? [],
+        { targetRole: getApplicationPosition() }
       );
-      showTailoredResume(enriched, changes, atsScore);
+      const displayAts = buildDisplayAtsScore(enriched, jobDescription, resume, atsScore);
+      showTailoredResume(enriched, changes, displayAts);
       activeJobContextKey = tailorSession.contextKey;
       activeBrowserTabId = tailorSession.tabId;
       await saveJobContext(tailorSession.contextKey, {
@@ -1099,15 +1170,16 @@ async function onTailor() {
         resumeText: serializeResume(enriched),
         structured: enriched,
         changes,
-        atsScore,
+        atsScore: displayAts,
       });
       updateAtsScore();
       await recordTailorHistory({
         jobDescription,
         structured: enriched,
         changes,
-        atsScore,
+        atsScore: displayAts,
         companyName: els.companyName.value.trim(),
+        position: els.position.value.trim(),
         jobUrl: els.jobUrl.value.trim(),
       });
       activeJobContextKey = tailorSession.contextKey;
