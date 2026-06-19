@@ -9,6 +9,7 @@ import {
   loadTailorHistory,
   normalizeJobRoleTitle,
   removeTailorHistoryEntry,
+  setTailorHistoryApplied,
 } from "../lib/tailor-history.js";
 import {
   getActiveBrowserTab,
@@ -779,6 +780,14 @@ async function renderHistory() {
       header.appendChild(score);
     }
 
+    const appliedToggle = document.createElement("button");
+    appliedToggle.type = "button";
+    appliedToggle.className = `history-applied-toggle${entry.applied ? " is-applied" : ""}`;
+    appliedToggle.dataset.action = "toggle-applied";
+    appliedToggle.setAttribute("aria-pressed", String(Boolean(entry.applied)));
+    appliedToggle.textContent = entry.applied ? "✓ Applied" : "Mark applied";
+    header.appendChild(appliedToggle);
+
     const title = document.createElement("p");
     title.className = "history-title";
     const position = historyEntryPosition(entry);
@@ -870,6 +879,12 @@ async function onHistoryListClick(event) {
     const history = await loadTailorHistory();
     const entry = history.find((record) => record.id === id);
     if (entry) await openHistoryEntry(entry);
+    return;
+  }
+
+  if (button.dataset.action === "toggle-applied") {
+    await setTailorHistoryApplied(id);
+    await renderHistory();
     return;
   }
 
