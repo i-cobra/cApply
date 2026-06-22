@@ -25,6 +25,7 @@ import {
 } from "../lib/job-context.js";
 import { loadSettings, saveSettings } from "../lib/settings.js";
 import { shouldShowOnboarding, completeOnboarding, ONBOARDING_STEPS } from "../lib/onboarding.js";
+import { parseRestructureJobResponse } from "../lib/restructure-job-response.js";
 import {
   buildResumeDownloadFilename,
   downloadResumePdf,
@@ -88,6 +89,7 @@ const els = {
   newApplicationBtn: document.getElementById("newApplicationBtn"),
   refreshApplicationBtn: document.getElementById("refreshApplicationBtn"),
   grabFromPage: document.getElementById("grabFromPage"),
+  restructureJobBtn: document.getElementById("restructureJobBtn"),
   clearProfile: document.getElementById("clearProfile"),
   profileFile: document.getElementById("profileFile"),
   saveProfile: document.getElementById("saveProfile"),
@@ -139,7 +141,10 @@ const els = {
   onboardingBody: document.getElementById("onboardingBody"),
   onboardingSkipBtn: document.getElementById("onboardingSkipBtn"),
   onboardingNextBtn: document.getElementById("onboardingNextBtn"),
+  scrollToTopBtn: document.getElementById("scrollToTopBtn"),
 };
+
+const SCROLL_TOP_THRESHOLD = 120;
 
 /** @type {import("../lib/tailor-history.js").JobStatus} */
 let activeJobsTab = "saved";
@@ -178,6 +183,9 @@ let tailorInProgress = false;
 
 /** @type {boolean} */
 let autoApplyInProgress = false;
+
+/** @type {boolean} */
+let restructureInProgress = false;
 
 /** @type {boolean} */
 let tailoredResumeReady = false;
@@ -261,6 +269,7 @@ async function init() {
   els.previewResumeBtn.addEventListener("click", onPreviewTailoredResume);
   els.autoApplyBtn.addEventListener("click", onAutoApplyJob);
   els.grabFromPage.addEventListener("click", onGrabFromPage);
+  els.restructureJobBtn.addEventListener("click", onRestructureJobDescription);
   els.clearProfile.addEventListener("click", onClearProfile);
   els.profileFile.addEventListener("change", onProfileFile);
   els.saveProfile.addEventListener("click", onSaveProfile);
@@ -286,6 +295,7 @@ async function init() {
   els.coverLetter.addEventListener("input", scheduleJobContextSave);
   els.onboardingSkipBtn.addEventListener("click", dismissOnboarding);
   els.onboardingNextBtn.addEventListener("click", advanceOnboarding);
+  initScrollToTop();
 
   updateApplicationActionButton();
   await renderHistory();
@@ -406,6 +416,7 @@ function applyApplicationState(state) {
 
   resetTailoredApplicationUi();
   updateAtsScore();
+  updateJobDescriptionActions();
 }
 
 function resetTailoredApplicationUi() {
@@ -463,7 +474,22 @@ function updateApplicationActionButton() {
     els.tailorBtn.setAttribute("aria-busy", "false");
   }
 
+  updateJobDescriptionActions();
   updateAtsScore();
+}
+
+function updateJobDescriptionActions() {
+  const hasJobText = Boolean(els.jobDescription.value.trim());
+  const showRestructure =
+    hasJobText &&
+    !hasTailoredResume() &&
+    !tailorInProgress &&
+    !autoApplyInProgress &&
+    !restructureInProgress;
+
+  els.restructureJobBtn.hidden = !showRestructure;
+  els.grabFromPage.disabled = tailorInProgress || autoApplyInProgress || restructureInProgress;
+  els.restructureJobBtn.disabled = restructureInProgress;
 }
 
 function getApplicationPosition() {
@@ -668,6 +694,7 @@ async function onRefreshApplication() {
     await persistJobContext();
     updateAtsScore();
     renderAnalysis();
+    updateJobDescriptionActions();
     setStatus("Application refreshed from the current page.", "success");
   } catch (err) {
     setStatus(err.message, "error");
@@ -719,9 +746,33 @@ function onApplicationInput() {
   }
   scheduleAtsScoreUpdate();
   scheduleJobContextSave();
+  updateJobDescriptionActions();
   if (!els.tabPanels.analysis.hidden) {
     renderAnalysis();
   }
+}
+
+function getActiveScrollPanel() {
+  if (els.settingsPanel && !els.settingsPanel.hidden) {
+    return els.settingsPanel;
+  }
+  return Object.values(els.tabPanels).find((panel) => !panel.hidden) ?? null;
+}
+
+function updateScrollToTopVisibility() {
+  const panel = getActiveScrollPanel();
+  const show = Boolean(panel && panel.scrollTop > SCROLL_TOP_THRESHOLD);
+  els.scrollToTopBtn.hidden = !show;
+}
+
+function initScrollToTop() {
+  const panels = [...Object.values(els.tabPanels), els.settingsPanel].filter(Boolean);
+  panels.forEach((panel) => {
+    panel.addEventListener("scroll", updateScrollToTopVisibility, { passive: true });
+  });
+  els.scrollToTopBtn.addEventListener("click", () => {
+    getActiveScrollPanel()?.scrollTo({ top: 0, behavior: "smooth" });
+  });
 }
 
 function setActiveTab(tabId) {
@@ -748,6 +799,8 @@ function setActiveTab(tabId) {
     updateCoverLetterVisibility();
   }
 
+  updateScrollToTopVisibility();
+
   if (tabId === "history") {
     renderHistory();
   }
@@ -770,6 +823,7 @@ function hideSettingsPanel(restoreTab = true) {
   els.settingsPanel.hidden = true;
   els.settingsPanel.classList.remove("active");
   if (restoreTab) setActiveTab(lastMainTab);
+  else updateScrollToTopVisibility();
 }
 
 function showSettingsPanel() {
@@ -785,6 +839,7 @@ function showSettingsPanel() {
   els.settingsPanel.hidden = false;
   els.settingsPanel.classList.add("active");
   if (appSettings) applySettingsToForm(appSettings);
+  updateScrollToTopVisibility();
 }
 
 /**
@@ -1525,10 +1580,95 @@ async function onGrabFromPage() {
     await persistJobContext();
     setStatus("Job description grabbed from page.", "success");
     updateAtsScore();
+    updateJobDescriptionActions();
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
-    els.grabFromPage.disabled = false;
+    updateJobDescriptionActions();
+  }
+}
+
+async function onRestructureJobDescription() {
+  const jobDescription = els.jobDescription.value.trim();
+
+  if (!jobDescription) {
+    setStatus("Add a job description first.", "error");
+    updateJobDescriptionActions();
+    return;
+  }
+
+  if (hasTailoredResume()) {
+    setStatus("Restructure is unavailable after tailoring.", "error");
+    updateJobDescriptionActions();
+    return;
+  }
+
+  const browserTab = await getActiveBrowserTab();
+  restructureInProgress = true;
+  updateJobDescriptionActions();
+  setStatus("Restructuring job description with ChatGPT…");
+
+  try {
+    const response = await sendBackgroundMessage(
+      {
+        type: "RESTRUCTURE_JOB_DESCRIPTION",
+        payload: {
+          jobDescription,
+          position: els.position.value.trim(),
+          companyName: els.companyName.value.trim(),
+          autoSend: els.autoSend.checked,
+          jobWindowId: browserTab?.windowId,
+        },
+      },
+      TAILOR_TIMEOUT_MS
+    );
+
+    if (response === undefined) {
+      throw new Error(
+        "Lost connection to the extension background. Reload cApply in chrome://extensions and try again."
+      );
+    }
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Failed to restructure job description.");
+    }
+
+    if (!response.responseText?.trim()) {
+      if (els.autoSend.checked) {
+        throw new Error(
+          "ChatGPT finished but no restructured text was captured. Check the ChatGPT tab and try again."
+        );
+      }
+      setStatus(
+        "Prompt ready in ChatGPT. Send it, then click Restructure job description again.",
+        "success"
+      );
+      return;
+    }
+
+    const restructured = parseRestructureJobResponse(response.responseText);
+    if (!restructured.jobDescription.trim()) {
+      throw new Error("ChatGPT returned an empty job description.");
+    }
+
+    els.jobDescription.value = restructured.jobDescription;
+    if (restructured.position && !els.position.value.trim()) {
+      els.position.value = normalizeJobRoleTitle(restructured.position);
+    }
+    if (restructured.companyName && !els.companyName.value.trim()) {
+      els.companyName.value = restructured.companyName;
+    }
+
+    latestAtsFromAi = null;
+    await persistJobContext();
+    updateAtsScore();
+    renderAnalysis();
+    setStatus("Job description restructured.", "success");
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    restructureInProgress = false;
+    updateJobDescriptionActions();
   }
 }
 

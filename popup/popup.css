@@ -9,6 +9,11 @@
   --danger: #f87171;
   --radius: 10px;
   --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --scrollbar-size: 8px;
+  --scrollbar-track: color-mix(in srgb, var(--bg) 82%, transparent);
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 42%, var(--border));
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--accent) 55%, var(--border));
+  --scrollbar-thumb-active: color-mix(in srgb, var(--accent) 72%, var(--border));
 }
 
 * {
@@ -174,6 +179,93 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  min-height: 40px;
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar-thumb:active {
+  background: var(--scrollbar-thumb-active);
+  background-clip: padding-box;
+}
+
+:where(
+  .tab-panel:not([hidden]),
+  .tab-panel-fill .resume-structured,
+  textarea,
+  .history-resume-text,
+  .history-notes,
+  .resume-structured
+)::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 .tab-panel-fill:not([hidden]) {
@@ -574,6 +666,8 @@ main {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .application-meta-grid {
@@ -737,6 +831,12 @@ select:focus {
 .link-btn:hover,
 .ghost-btn:hover {
   text-decoration: underline;
+}
+
+.link-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .options {
@@ -1242,15 +1342,6 @@ footer,
   border-color: var(--accent);
 }
 
-.resume-structured::-webkit-scrollbar {
-  width: 6px;
-}
-
-.resume-structured::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 999px;
-}
-
 .history-header-actions {
   display: flex;
   align-items: center;
@@ -1427,4 +1518,43 @@ footer,
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.scroll-to-top-btn {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  transition: color 0.15s, border-color 0.15s, background 0.15s, opacity 0.15s, transform 0.15s;
+}
+
+.scroll-to-top-btn:not([hidden]) {
+  display: inline-flex;
+}
+
+.scroll-to-top-btn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.scroll-to-top-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.scroll-to-top-btn:active {
+  transform: scale(0.96);
 }

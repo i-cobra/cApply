@@ -1,5 +1,6 @@
-import { buildFillProfilePrompt, buildTailorPrompt, buildAutoApplyPrompt } from "./lib/prompt.js";
+import { buildFillProfilePrompt, buildTailorPrompt, buildAutoApplyPrompt, buildRestructureJobDescriptionPrompt } from "./lib/prompt.js";
 import { parseTailorResponse } from "./lib/tailor-response.js";
+import { parseRestructureJobResponse } from "./lib/restructure-job-response.js";
 import {
   autoApplyResponseLooksComplete,
   hasAutoApplyMarkers,
@@ -16,6 +17,11 @@ import { inferJobRole } from "./lib/tailor-history.js";
 import { loadSettings } from "./lib/settings.js";
 import { callOpenAiChat } from "./lib/openai-api.js";
 import { getHybridAutoApplySteps } from "./lib/auto-apply-hybrid.js";
+import {
+  CHATGPT_MODEL_HIGH,
+  CHATGPT_MODEL_INSTANT,
+  getChatGptModelConfig,
+} from "./lib/chatgpt-models.js";
 import "./lib/jspdf/jspdf.umd.min.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
@@ -53,6 +59,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "FILL_PROFILE") {
     handleFillProfile(message.payload)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === "RESTRUCTURE_JOB_DESCRIPTION") {
+    handleRestructureJobDescription(message.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -475,7 +488,7 @@ async function runAutoApplyPromptWithPolling(tabId, prompt) {
       func: () => window.__cApplyStartKeepalive?.(),
     });
 
-    const sendResult = await injectAndSend(tabId, prompt);
+    const sendResult = await injectAndSend(tabId, prompt, CHATGPT_MODEL_HIGH);
     if (!sendResult?.ok || !sendResult.sent) {
       throw new Error(sendResult?.error || "Could not send auto-apply prompt to ChatGPT.");
     }
@@ -581,11 +594,18 @@ async function handleTailorResume(payload) {
       apiKey: settings.openAiApiKey,
       model: settings.openAiModel,
       prompt,
+      reasoningEffort: getChatGptModelConfig(CHATGPT_MODEL_HIGH).reasoningEffort,
     });
     return { ok: true, sent: true, responseText, source: "openai-api" };
   }
 
-  return runChatGPTPrompt(prompt, autoSend ?? settings.autoSend, jobWindowId);
+  return runChatGPTPrompt(
+    prompt,
+    autoSend ?? settings.autoSend,
+    jobWindowId,
+    TAILOR_RESPONSE_PROFILE,
+    CHATGPT_MODEL_HIGH
+  );
 }
 
 async function handleFillProfile(payload) {
@@ -601,7 +621,46 @@ async function handleFillProfile(payload) {
     extraInstructions: extraInstructions || "",
   });
 
-  return runChatGPTPrompt(prompt, autoSend);
+  return runChatGPTPrompt(
+    prompt,
+    autoSend,
+    undefined,
+    TAILOR_RESPONSE_PROFILE,
+    CHATGPT_MODEL_INSTANT
+  );
+}
+
+async function handleRestructureJobDescription(payload) {
+  const { jobDescription, position = "", companyName = "", autoSend, jobWindowId } = payload || {};
+
+  if (!jobDescription?.trim()) {
+    throw new Error("Job description is empty.");
+  }
+
+  const settings = await loadSettings();
+  const prompt = buildRestructureJobDescriptionPrompt({
+    jobDescription,
+    position,
+    companyName,
+  });
+
+  if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
+    const responseText = await callOpenAiChat({
+      apiKey: settings.openAiApiKey,
+      model: settings.openAiModel,
+      prompt,
+      reasoningEffort: getChatGptModelConfig(CHATGPT_MODEL_INSTANT).reasoningEffort,
+    });
+    return { ok: true, sent: true, responseText, source: "openai-api" };
+  }
+
+  return runChatGPTPrompt(
+    prompt,
+    autoSend ?? settings.autoSend,
+    jobWindowId,
+    RESTRUCTURE_RESPONSE_PROFILE,
+    CHATGPT_MODEL_INSTANT
+  );
 }
 
 async function getJobTabContext() {
@@ -612,7 +671,13 @@ async function getJobTabContext() {
   };
 }
 
-async function runChatGPTPrompt(prompt, autoSend, explicitJobWindowId) {
+async function runChatGPTPrompt(
+  prompt,
+  autoSend,
+  explicitJobWindowId,
+  profile = TAILOR_RESPONSE_PROFILE,
+  modelTier = CHATGPT_MODEL_HIGH
+) {
   const jobWindowId =
     explicitJobWindowId ?? (await getJobTabContext()).jobWindowId;
   const tab = await findOrOpenChatGPTTab(jobWindowId);
@@ -625,11 +690,11 @@ async function runChatGPTPrompt(prompt, autoSend, explicitJobWindowId) {
   await waitForChatGPTReady(tab.id);
 
   if (!autoSend) {
-    await runInjectOnly(tab.id, prompt);
+    await runInjectOnly(tab.id, prompt, modelTier);
     return { ok: true, tabId: tab.id, sent: false, responseText: "" };
   }
 
-  const responseText = await runPromptWithPolling(tab.id, prompt);
+  const responseText = await runPromptWithPolling(tab.id, prompt, profile, modelTier);
 
   return {
     ok: true,
@@ -666,6 +731,15 @@ function hasBalancedJsonBraces(text) {
   return depth === 0;
 }
 
+function hasRestructureJobMarkers(text) {
+  if (!text?.includes("{")) return false;
+  return (
+    text.includes('"jobDescription"') ||
+    text.includes('"job_description"') ||
+    text.includes('"description"')
+  );
+}
+
 function hasTailorResumeMarkers(text) {
   if (!text?.includes("{")) return false;
   return (
@@ -689,7 +763,7 @@ function looksLikeTailorJson(text) {
   return hasTailorResumeMarkers(text) && hasAtsScoreProperty(text) && text.length > 80;
 }
 
-function pickCaptureText(capture) {
+function pickTailorCaptureText(capture) {
   const stream = capture.streamText || "";
   const dom = capture.domText || "";
   const hasNew = Boolean(capture.hasNewAssistant);
@@ -727,7 +801,53 @@ function pickCaptureText(capture) {
   return dom.length > stream.length ? dom : stream;
 }
 
-async function injectAndSend(tabId, prompt) {
+function pickRestructureCaptureText(capture) {
+  const stream = capture.streamText || "";
+  const dom = capture.domText || "";
+  const hasNew = Boolean(capture.hasNewAssistant);
+  const inFlight = Boolean(capture.generating || capture.streamStarted);
+
+  if (!hasNew && !inFlight) {
+    if (hasRestructureJobMarkers(dom) && dom.length > 50) return dom;
+    if (hasRestructureJobMarkers(stream) && stream.length > 50) return stream;
+    return "";
+  }
+
+  if (inFlight && !hasNew) {
+    return hasRestructureJobMarkers(stream) ? stream : "";
+  }
+
+  if (hasRestructureJobMarkers(dom) && dom.length > 50) return dom;
+  if (hasRestructureJobMarkers(stream) && stream.length > 50) return stream;
+
+  return dom.length > stream.length ? dom : stream;
+}
+
+async function prepareChatGptModel(tabId, modelTier) {
+  const config = getChatGptModelConfig(modelTier);
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: (cfg) => {
+      window.__cApplySetActiveChatModelConfig?.(cfg);
+    },
+    args: [config],
+  });
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (label) => window.__cApplySelectChatModel?.(label),
+    args: [config.label],
+  });
+
+  return result || { ok: true };
+}
+
+async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
+  await prepareChatGptModel(tabId, modelTier);
+
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -838,7 +958,12 @@ async function pollCapture(tabId, assistantCountBefore = 0) {
   return result || {};
 }
 
-async function runPromptWithPolling(tabId, prompt) {
+async function runPromptWithPolling(
+  tabId,
+  prompt,
+  profile = TAILOR_RESPONSE_PROFILE,
+  modelTier = CHATGPT_MODEL_HIGH
+) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 
   const stopKeepalive = startBackgroundKeepalive();
@@ -850,7 +975,7 @@ async function runPromptWithPolling(tabId, prompt) {
       func: () => window.__cApplyStartKeepalive?.(),
     });
 
-    const sendResult = await injectAndSend(tabId, prompt);
+    const sendResult = await injectAndSend(tabId, prompt, modelTier);
     if (!sendResult?.ok || !sendResult.sent) {
       throw new Error(sendResult?.error || "Could not send prompt to ChatGPT.");
     }
@@ -871,9 +996,9 @@ async function runPromptWithPolling(tabId, prompt) {
       await sleep(500);
     }
 
-    let lastError = "ChatGPT did not return resume JSON.";
+    const lastError = profile.emptyError;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const text = await waitForCapturedResponse(tabId, assistantCountBefore);
+      const text = await waitForCapturedResponse(tabId, assistantCountBefore, profile);
       if (text) return text;
       await sleep(1000);
     }
@@ -911,15 +1036,66 @@ function isUsableTailorResponse(text) {
   }
 }
 
+function isUsableRestructureResponse(text) {
+  if (!text?.trim() || !hasRestructureJobMarkers(text) || text.length <= 50) return false;
+  try {
+    const parsed = parseRestructureJobResponse(text);
+    return Boolean(parsed.jobDescription.trim());
+  } catch {
+    return false;
+  }
+}
+
 function responseLooksComplete(text) {
   if (!text?.trim()) return false;
   if (hasAtsScoreProperty(text) && hasBalancedJsonBraces(text)) return true;
   return hasBalancedJsonBraces(text) && text.includes('"tailoredResume"');
 }
 
+function restructureLooksComplete(text) {
+  if (!text?.trim()) return false;
+  return hasRestructureJobMarkers(text) && hasBalancedJsonBraces(text);
+}
+
 function stableRoundsNeeded(text) {
   return responseLooksComplete(text) ? 1 : 2;
 }
+
+function restructureStableRoundsNeeded(text) {
+  return restructureLooksComplete(text) ? 1 : 2;
+}
+
+/** @typedef {{
+ *   minLength: number,
+ *   emptyError: string,
+ *   hasMarkers: (text: string) => boolean,
+ *   pickCaptureText: (capture: Record<string, unknown>) => string,
+ *   isUsable: (text: string) => boolean,
+ *   looksComplete: (text: string) => boolean,
+ *   stableRoundsNeeded: (text: string) => number
+ * }} ChatGptResponseProfile */
+
+/** @type {ChatGptResponseProfile} */
+const TAILOR_RESPONSE_PROFILE = {
+  minLength: 80,
+  emptyError: "ChatGPT did not return resume JSON.",
+  hasMarkers: hasTailorResumeMarkers,
+  pickCaptureText: pickTailorCaptureText,
+  isUsable: isUsableTailorResponse,
+  looksComplete: responseLooksComplete,
+  stableRoundsNeeded,
+};
+
+/** @type {ChatGptResponseProfile} */
+const RESTRUCTURE_RESPONSE_PROFILE = {
+  minLength: 50,
+  emptyError: "ChatGPT did not return restructured job description JSON.",
+  hasMarkers: hasRestructureJobMarkers,
+  pickCaptureText: pickRestructureCaptureText,
+  isUsable: isUsableRestructureResponse,
+  looksComplete: restructureLooksComplete,
+  stableRoundsNeeded: restructureStableRoundsNeeded,
+};
 
 function startBackgroundKeepalive() {
   const timer = setInterval(() => {
@@ -928,14 +1104,18 @@ function startBackgroundKeepalive() {
   return () => clearInterval(timer);
 }
 
-async function waitForCapturedResponse(tabId, assistantCountBefore) {
+async function waitForCapturedResponse(
+  tabId,
+  assistantCountBefore,
+  profile = TAILOR_RESPONSE_PROFILE
+) {
   const deadline = Date.now() + 310000;
   let lastText = "";
   let stableRounds = 0;
 
   while (Date.now() < deadline) {
     const capture = await pollCapture(tabId, assistantCountBefore);
-    const candidate = pickCaptureText(capture);
+    const candidate = profile.pickCaptureText(capture);
 
     if (
       capture.streamError &&
@@ -945,7 +1125,11 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
       throw new Error(capture.streamError);
     }
 
-    if (!candidate || !hasTailorResumeMarkers(candidate) || candidate.length <= 80) {
+    if (
+      !candidate ||
+      !profile.hasMarkers(candidate) ||
+      candidate.length <= profile.minLength
+    ) {
       stableRounds = 0;
       lastText = candidate || "";
       await sleep(500);
@@ -960,9 +1144,10 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
     }
 
     const ready =
-      stableRounds >= stableRoundsNeeded(candidate) && isUsableTailorResponse(candidate);
+      stableRounds >= profile.stableRoundsNeeded(candidate) &&
+      profile.isUsable(candidate);
 
-    if (ready && (!capture.generating || responseLooksComplete(candidate))) {
+    if (ready && (!capture.generating || profile.looksComplete(candidate))) {
       return candidate;
     }
 
@@ -970,8 +1155,8 @@ async function waitForCapturedResponse(tabId, assistantCountBefore) {
   }
 
   const finalCapture = await pollCapture(tabId, assistantCountBefore);
-  const final = pickCaptureText(finalCapture) || lastText?.trim() || "";
-  return isUsableTailorResponse(final) ? final : "";
+  const final = profile.pickCaptureText(finalCapture) || lastText?.trim() || "";
+  return profile.isUsable(final) ? final : "";
 }
 
 async function ensurePageApi(tabId) {
@@ -1053,7 +1238,9 @@ async function waitForChatGPTReady(tabId, maxMs = 120000) {
   );
 }
 
-async function runInjectOnly(tabId, prompt) {
+async function runInjectOnly(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
+  await prepareChatGptModel(tabId, modelTier);
+
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",

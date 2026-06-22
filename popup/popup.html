@@ -98,7 +98,10 @@
 
       <div class="field-header">
         <label for="jobDescription">Job description</label>
-        <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
+        <div class="field-actions">
+          <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
+          <button type="button" id="restructureJobBtn" class="link-btn" hidden>Restructure job description</button>
+        </div>
       </div>
       <textarea id="jobDescription" rows="6" placeholder="Paste the job posting here…"></textarea>
 
@@ -363,6 +366,13 @@
       <p id="settingsStatus" class="status" role="status" aria-live="polite"></p>
     </section>
   </main>
+
+  <button type="button" id="scrollToTopBtn" class="scroll-to-top-btn" hidden aria-label="Scroll to top" title="Scroll to top">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5" />
+      <path d="m5 12 7-7 7 7" />
+    </svg>
+  </button>
 
   <div id="onboardingOverlay" class="onboarding-overlay" hidden>
     <div class="onboarding-card" role="dialog" aria-labelledby="onboardingTitle">

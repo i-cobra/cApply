@@ -418,8 +418,7 @@
 
     const originalFetch = window.fetch.bind(window);
     window.fetch = async (...args) => {
-      const init = args[1];
-      const request = args[0];
+      let [request, init] = args;
       const url =
         typeof request === "string"
           ? request
@@ -427,10 +426,35 @@
             ? request.url
             : String(request);
 
+      const method = String(
+        init?.method || (request instanceof Request ? request.method : "GET")
+      ).toUpperCase();
+
+      if (
+        method === "POST" &&
+        isConversationUrl(url) &&
+        window.__cApplyActiveChatModelConfig &&
+        init?.body &&
+        typeof init.body === "string"
+      ) {
+        try {
+          const body = JSON.parse(init.body);
+          const cfg = window.__cApplyActiveChatModelConfig;
+          if (cfg.conversationModel) body.model = cfg.conversationModel;
+          if (cfg.reasoningEffort) {
+            body.reasoning = { effort: cfg.reasoningEffort };
+            body.reasoning_effort = cfg.reasoningEffort;
+          }
+          init = { ...init, body: JSON.stringify(body) };
+        } catch {
+          // keep original body
+        }
+      }
+
       if (init?.headers) captureHeaders(init.headers);
       if (request instanceof Request) captureHeaders(request.headers);
 
-      const response = await originalFetch(...args);
+      const response = await originalFetch(request, init);
 
       if (isConversationUrl(url) && response.ok) {
         const generation = window.__cApplyStreamCapture?.generation ?? streamCaptureGeneration;
@@ -707,6 +731,76 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function normalizeModelLabel(text) {
+    return String(text || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function modelLabelMatches(optionText, targetLabel) {
+    const option = normalizeModelLabel(optionText);
+    const target = normalizeModelLabel(targetLabel);
+    if (!target) return false;
+    if (option === target) return true;
+    if (target === "instant" && /\binstant\b/.test(option)) return true;
+    if (target === "high" && /\bhigh\b/.test(option) && !/extra\s*high/.test(option)) {
+      return true;
+    }
+    return option.includes(target);
+  }
+
+  function readCurrentModelLabel() {
+    const switcher = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+    const text = switcher?.textContent?.trim();
+    if (text && text.length < 80) return text;
+    return "";
+  }
+
+  window.__cApplySetActiveChatModelConfig = function (config) {
+    window.__cApplyActiveChatModelConfig = config || null;
+  };
+
+  window.__cApplySelectChatModel = async function (label) {
+    spoofPageVisibility();
+    const target = String(label || "").trim();
+    if (!target) return { ok: true, skipped: true };
+
+    const current = readCurrentModelLabel();
+    if (modelLabelMatches(current, target)) {
+      return { ok: true, alreadySelected: true, current };
+    }
+
+    const switcher = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+    if (!switcher) {
+      return { ok: false, error: "ChatGPT model switcher not found." };
+    }
+
+    switcher.click();
+    await sleep(350);
+
+    const wrappers = document.querySelectorAll("[data-radix-popper-content-wrapper]");
+    const menu = wrappers[wrappers.length - 1] || document.body;
+    const options = menu.querySelectorAll(
+      '[role="menuitem"], [role="menuitemradio"], [role="option"], button'
+    );
+
+    for (const opt of options) {
+      const text = opt.textContent?.trim() || "";
+      if (!text || text.length > 80) continue;
+      if (modelLabelMatches(text, target)) {
+        opt.click();
+        await sleep(250);
+        return { ok: true, selected: text, current: readCurrentModelLabel() };
+      }
+    }
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
+    );
+    return { ok: false, error: `Model "${target}" was not found in the ChatGPT model menu.` };
+  };
+
   async function getChatGPTSession() {
     const response = await fetch("/api/auth/session", { credentials: "include" });
     return response.json();
@@ -714,7 +808,9 @@
 
   function buildConversationBody(prompt) {
     const pathMatch = location.pathname.match(/\/c\/([0-9a-f-]+)/i);
-    return {
+    const cfg = window.__cApplyActiveChatModelConfig;
+    /** @type {Record<string, unknown>} */
+    const body = {
       action: "next",
       messages: [
         {
@@ -726,12 +822,19 @@
       ],
       conversation_id: pathMatch?.[1] || crypto.randomUUID(),
       parent_message_id: crypto.randomUUID(),
-      model: "auto",
+      model: cfg?.conversationModel || "auto",
       timezone_offset_min: new Date().getTimezoneOffset(),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       history_and_training_disabled: false,
       conversation_mode: { kind: "primary_assistant" },
     };
+
+    if (cfg?.reasoningEffort) {
+      body.reasoning = { effort: cfg.reasoningEffort };
+      body.reasoning_effort = cfg.reasoningEffort;
+    }
+
+    return body;
   }
 
   function buildApiHeaders(accessToken, session) {
