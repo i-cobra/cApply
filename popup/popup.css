@@ -40,6 +40,55 @@ header {
   flex-shrink: 0;
 }
 
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.header-settings-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.header-settings-btn:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.header-settings-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  flex-shrink: 0;
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
 h1 {
   margin: 0;
   font-size: 18px;
@@ -249,6 +298,37 @@ main {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.jobs-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.jobs-tab {
+  flex: 1;
+  border: none;
+  border-radius: 7px;
+  padding: 7px 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.jobs-tab:hover {
+  color: var(--text);
+}
+
+.jobs-tab.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
 
 .history-search {
@@ -503,6 +583,18 @@ main {
   margin-bottom: 10px;
 }
 
+.application-new-action {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.application-new-action .primary {
+  width: auto;
+}
+
 .application-meta-grid label {
   display: flex;
   flex-direction: column;
@@ -525,19 +617,25 @@ main {
 
 .application-actions-secondary {
   margin-top: 10px;
+  flex-wrap: wrap;
 }
 
 .application-actions-secondary[hidden] {
   display: none !important;
 }
 
-.application-actions .primary,
-.application-actions-secondary .primary {
-  width: auto;
+.application-actions .primary {
+  width: 100%;
   flex: 1;
   min-width: 0;
 }
 
+.application-actions-secondary .primary {
+  flex: 1 1 calc(33.333% - 8px);
+  min-width: 120px;
+}
+
+.action-btn,
 .tailor-btn {
   display: inline-flex;
   align-items: center;
@@ -545,12 +643,14 @@ main {
   gap: 8px;
 }
 
+.action-btn-icon,
 .tailor-btn-icon {
   display: inline-flex;
   flex-shrink: 0;
   line-height: 0;
 }
 
+.tailor-btn.busy .action-btn-icon,
 .tailor-btn.busy .tailor-btn-icon {
   animation: tailor-logo-spin 1s linear infinite;
 }
@@ -671,12 +771,109 @@ select:focus {
   color: var(--muted);
 }
 
-.options-grid .checkbox {
-  grid-column: 1 / -1;
+/* Custom checkboxes — Application options + Settings */
+label.checkbox {
+  display: flex;
   flex-direction: row;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 55%, var(--surface));
   color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+label.checkbox:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+label.checkbox:has(input:focus-visible) {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+label.checkbox:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+label.checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  border: 1.5px solid color-mix(in srgb, var(--muted) 55%, var(--border));
+  border-radius: 5px;
+  background: var(--bg);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.12s ease;
+}
+
+label.checkbox:hover input[type="checkbox"]:not(:checked) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+label.checkbox input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+label.checkbox input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+label.checkbox input[type="checkbox"]:active {
+  transform: scale(0.94);
+}
+
+label.checkbox input[type="checkbox"]:focus {
+  outline: none;
+}
+
+label.checkbox input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+label.checkbox input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+label.checkbox .checkbox-text {
+  flex: 1;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.options-grid .checkbox,
+.settings-grid .checkbox {
+  grid-column: 1 / -1;
 }
 
 .full-width {
@@ -1052,4 +1249,182 @@ footer,
 .resume-structured::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 999px;
+}
+
+.history-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.history-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.history-stat {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+}
+
+.history-notes {
+  width: 100%;
+  min-height: 56px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+
+.analysis-panel,
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analysis-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.analysis-report {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.analysis-score-card {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.analysis-score-copy {
+  flex: 1;
+}
+
+.analysis-summary {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.analysis-target {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.analysis-section h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.analysis-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.analysis-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis-tags li {
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--muted);
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.settings-grid > label:not(.checkbox) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.settings-grid .full-width {
+  grid-column: 1 / -1;
+}
+
+.settings-actions {
+  margin-top: 4px;
+}
+
+.cover-letter-section textarea {
+  min-height: 140px;
+}
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.onboarding-overlay:not([hidden]) {
+  display: flex;
+}
+
+.onboarding-card {
+  width: min(100%, 320px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.onboarding-step-label {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.onboarding-card h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.onboarding-body {
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.onboarding-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }

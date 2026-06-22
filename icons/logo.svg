@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 156 40" fill="none" aria-labelledby="logo-title">
+  <title id="logo-title">cApply</title>
+  <g transform="translate(4, 4)">
+    <path
+      d="M9 16c0-5.523 4.477-10 10-10"
+      stroke="#10a37f"
+      stroke-width="2.25"
+      stroke-linecap="round"
+    />
+    <rect
+      x="12"
+      y="6"
+      width="17"
+      height="22"
+      rx="2.5"
+      stroke="#10a37f"
+      stroke-width="1.75"
+    />
+    <path
+      d="M12 11h17"
+      stroke="#10a37f"
+      stroke-width="1.25"
+      stroke-linecap="round"
+    />
+    <path
+      d="M16 15h9"
+      stroke="#10a37f"
+      stroke-width="1.25"
+      stroke-linecap="round"
+    />
+    <path
+      d="M16 19h7.5"
+      stroke="#10a37f"
+      stroke-width="1.75"
+      stroke-linecap="round"
+    />
+    <path
+      d="M16 23h5"
+      stroke="#10a37f"
+      stroke-width="1.25"
+      stroke-linecap="round"
+    />
+    <path
+      d="M27 8v3M25.5 9.5h3"
+      stroke="#10a37f"
+      stroke-width="1.5"
+      stroke-linecap="round"
+    />
+  </g>
+  <text
+    x="46"
+    y="27"
+    fill="#e8eaef"
+    font-family="Segoe UI, system-ui, -apple-system, sans-serif"
+    font-size="22"
+    font-weight="700"
+    letter-spacing="-0.03em"
+  >
+    cApply
+  </text>
+</svg>

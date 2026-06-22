@@ -1,15 +1,21 @@
 import { readResumeFile } from "../lib/pdf-extract.js";
 import { scoreTier } from "../lib/ats-score.js";
+import { buildAnalysisReport } from "../lib/analysis-report.js";
 import { emptyResume, parseResumeText, serializeResume } from "../lib/resume-structure.js";
 import {
   addTailorHistoryEntry,
   clearTailorHistory,
+  exportHistoryCsv,
   formatHistoryDate,
+  getEntryStatus,
+  getHistoryStats,
   inferJobRole,
   loadTailorHistory,
   normalizeJobRoleTitle,
   removeTailorHistoryEntry,
   setTailorHistoryApplied,
+  setTailorHistoryNotes,
+  setTailorHistoryStatus,
 } from "../lib/tailor-history.js";
 import {
   getActiveBrowserTab,
@@ -17,6 +23,8 @@ import {
   loadJobContext,
   saveJobContext,
 } from "../lib/job-context.js";
+import { loadSettings, saveSettings } from "../lib/settings.js";
+import { shouldShowOnboarding, completeOnboarding, ONBOARDING_STEPS } from "../lib/onboarding.js";
 import {
   buildResumeDownloadFilename,
   downloadResumePdf,
@@ -76,7 +84,9 @@ const els = {
   applicationActionsSecondary: document.getElementById("applicationActionsSecondary"),
   downloadResumeBtn: document.getElementById("downloadResumeBtn"),
   previewResumeBtn: document.getElementById("previewResumeBtn"),
+  autoApplyBtn: document.getElementById("autoApplyBtn"),
   newApplicationBtn: document.getElementById("newApplicationBtn"),
+  refreshApplicationBtn: document.getElementById("refreshApplicationBtn"),
   grabFromPage: document.getElementById("grabFromPage"),
   clearProfile: document.getElementById("clearProfile"),
   profileFile: document.getElementById("profileFile"),
@@ -94,6 +104,51 @@ const els = {
   historyCompanySearch: document.getElementById("historyCompanySearch"),
   historyPositionSearch: document.getElementById("historyPositionSearch"),
   clearHistory: document.getElementById("clearHistory"),
+  jobsTabs: document.querySelectorAll(".jobs-tab"),
+  settingsBtn: document.getElementById("settingsBtn"),
+  coverLetterSection: document.getElementById("coverLetterSection"),
+  coverLetter: document.getElementById("coverLetter"),
+  copyCoverLetterBtn: document.getElementById("copyCoverLetterBtn"),
+  analysisEmpty: document.getElementById("analysisEmpty"),
+  analysisReport: document.getElementById("analysisReport"),
+  analysisScoreRing: document.getElementById("analysisScoreRing"),
+  analysisScoreValue: document.getElementById("analysisScoreValue"),
+  analysisSummary: document.getElementById("analysisSummary"),
+  analysisTarget: document.getElementById("analysisTarget"),
+  analysisRecommendations: document.getElementById("analysisRecommendations"),
+  analysisFixableGaps: document.getElementById("analysisFixableGaps"),
+  analysisUnsupportedGaps: document.getElementById("analysisUnsupportedGaps"),
+  analysisPriorityKeywords: document.getElementById("analysisPriorityKeywords"),
+  refreshAnalysisBtn: document.getElementById("refreshAnalysisBtn"),
+  historyStats: document.getElementById("historyStats"),
+  exportHistoryBtn: document.getElementById("exportHistoryBtn"),
+  settingsPanel: document.getElementById("panel-settings"),
+  closeSettingsBtn: document.getElementById("closeSettingsBtn"),
+  saveSettingsBtn: document.getElementById("saveSettingsBtn"),
+  settingsStatus: document.getElementById("settingsStatus"),
+  settingsDefaultTone: document.getElementById("settingsDefaultTone"),
+  settingsDefaultOutput: document.getElementById("settingsDefaultOutput"),
+  settingsAutoSend: document.getElementById("settingsAutoSend"),
+  settingsHybridAutoApply: document.getElementById("settingsHybridAutoApply"),
+  settingsUseOpenAiApi: document.getElementById("settingsUseOpenAiApi"),
+  settingsOpenAiModel: document.getElementById("settingsOpenAiModel"),
+  settingsOpenAiApiKey: document.getElementById("settingsOpenAiApiKey"),
+  onboardingOverlay: document.getElementById("onboardingOverlay"),
+  onboardingStepLabel: document.getElementById("onboardingStepLabel"),
+  onboardingTitle: document.getElementById("onboardingTitle"),
+  onboardingBody: document.getElementById("onboardingBody"),
+  onboardingSkipBtn: document.getElementById("onboardingSkipBtn"),
+  onboardingNextBtn: document.getElementById("onboardingNextBtn"),
+};
+
+/** @type {import("../lib/tailor-history.js").JobStatus} */
+let activeJobsTab = "saved";
+
+const JOBS_EMPTY_MESSAGES = {
+  saved: "No saved jobs yet. Tailor a resume on the Application tab.",
+  applied: "No applied jobs yet. Mark a saved job as applied when you submit.",
+  interview: "No interviews yet. Move an applied job here when you get an interview.",
+  archived: "No archived jobs yet.",
 };
 
 const profileEditor = createResumeEditor(els.profileResumeEditor);
@@ -122,7 +177,22 @@ let activeJobContextKey = null;
 let tailorInProgress = false;
 
 /** @type {boolean} */
+let autoApplyInProgress = false;
+
+/** @type {boolean} */
 let tailoredResumeReady = false;
+
+/** @type {string} */
+let latestCoverLetter = "";
+
+/** @type {string} */
+let lastMainTab = "application";
+
+/** @type {number} */
+let onboardingStepIndex = 0;
+
+/** @type {import("../lib/settings.js").AppSettings | null} */
+let appSettings = null;
 
 /**
  * Browser tab + storage key captured when tailoring starts so tab switches
@@ -132,6 +202,7 @@ let tailoredResumeReady = false;
 let tailorSession = null;
 
 const TAILOR_TIMEOUT_MS = 320_000;
+const AUTO_APPLY_TIMEOUT_MS = 900_000;
 
 /**
  * @param {unknown} message
@@ -156,13 +227,19 @@ init();
 
 async function init() {
   await loadProfileResume();
-
-  activeJobContextKey = getJobContextKey();
-  await migrateLegacyApplicationState(activeJobContextKey);
-  applyApplicationState(await loadJobContext(activeJobContextKey));
+  appSettings = await loadSettings();
+  applySettingsToForm(appSettings);
 
   const tab = await getActiveBrowserTab();
-  if (tab) activeBrowserTabId = tab.tabId;
+  if (tab) {
+    activeBrowserTabId = tab.tabId;
+    activeJobContextKey = getJobContextKey(tab.url, tab.tabId);
+  } else {
+    activeJobContextKey = getJobContextKey();
+  }
+
+  await migrateLegacyApplicationState(activeJobContextKey);
+  applyApplicationState(await loadJobContext(activeJobContextKey));
 
   els.mainTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveTab(tab.dataset.tab));
@@ -179,8 +256,10 @@ async function init() {
 
   els.tailorBtn.addEventListener("click", onTailor);
   els.newApplicationBtn.addEventListener("click", onNewApplication);
+  els.refreshApplicationBtn.addEventListener("click", onRefreshApplication);
   els.downloadResumeBtn.addEventListener("click", onDownloadTailoredResume);
   els.previewResumeBtn.addEventListener("click", onPreviewTailoredResume);
+  els.autoApplyBtn.addEventListener("click", onAutoApplyJob);
   els.grabFromPage.addEventListener("click", onGrabFromPage);
   els.clearProfile.addEventListener("click", onClearProfile);
   els.profileFile.addEventListener("change", onProfileFile);
@@ -190,13 +269,27 @@ async function init() {
   els.companyName.addEventListener("input", scheduleJobContextSave);
   els.position.addEventListener("input", scheduleJobContextSave);
   els.jobUrl.addEventListener("input", scheduleJobContextSave);
+  els.outputFormat.addEventListener("change", updateCoverLetterVisibility);
   els.clearHistory.addEventListener("click", onClearHistory);
   els.historyList.addEventListener("click", onHistoryListClick);
   els.historyCompanySearch.addEventListener("input", () => renderHistory());
   els.historyPositionSearch.addEventListener("input", () => renderHistory());
+  els.jobsTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setActiveJobsTab(tab.dataset.jobsTab));
+  });
+  els.settingsBtn.addEventListener("click", showSettingsPanel);
+  els.closeSettingsBtn.addEventListener("click", hideSettingsPanel);
+  els.saveSettingsBtn.addEventListener("click", onSaveSettings);
+  els.refreshAnalysisBtn.addEventListener("click", renderAnalysis);
+  els.exportHistoryBtn.addEventListener("click", onExportHistory);
+  els.copyCoverLetterBtn.addEventListener("click", onCopyCoverLetter);
+  els.coverLetter.addEventListener("input", scheduleJobContextSave);
+  els.onboardingSkipBtn.addEventListener("click", dismissOnboarding);
+  els.onboardingNextBtn.addEventListener("click", advanceOnboarding);
 
   updateApplicationActionButton();
   await renderHistory();
+  await maybeShowOnboarding();
 }
 
 async function loadProfileResume() {
@@ -278,6 +371,7 @@ function collectApplicationState() {
     structured: hasTailored ? structured : null,
     changes: latestTailorChanges,
     atsScore: latestAtsFromAi,
+    coverLetter: latestCoverLetter || els.coverLetter.value.trim(),
   };
 }
 
@@ -291,6 +385,9 @@ function applyApplicationState(state) {
   els.jobUrl.value = state?.jobUrl ?? "";
   latestTailorChanges = state?.changes ?? [];
   latestAtsFromAi = state?.atsScore ?? null;
+  latestCoverLetter = state?.coverLetter ?? "";
+  els.coverLetter.value = latestCoverLetter;
+  updateCoverLetterVisibility();
 
   if (state?.structured && hasResumeContent(state.structured)) {
     showTailoredResume(state.structured, latestTailorChanges, latestAtsFromAi);
@@ -314,6 +411,9 @@ function applyApplicationState(state) {
 function resetTailoredApplicationUi() {
   latestTailorChanges = [];
   latestAtsFromAi = null;
+  latestCoverLetter = "";
+  els.coverLetter.value = "";
+  els.coverLetterSection.hidden = true;
   tailoredResumeReady = false;
   tailoredEditor.setStructured(emptyResume(), { silent: true });
   els.tailoredResumeSection.hidden = true;
@@ -346,13 +446,14 @@ function updateApplicationActionButton() {
     tailoredResumeReady = false;
   }
 
-  const showSecondary = hasTailoredResume() && !tailorInProgress;
+  const showSecondary = hasTailoredResume() && !tailorInProgress && !autoApplyInProgress;
 
   els.applicationActionsSecondary.hidden = !showSecondary;
   setTailorBtnLabel(getTailorActionLabel());
-  els.tailorBtn.disabled = tailorInProgress;
-  els.downloadResumeBtn.disabled = tailorInProgress;
-  els.previewResumeBtn.disabled = tailorInProgress;
+  els.tailorBtn.disabled = tailorInProgress || autoApplyInProgress;
+  els.downloadResumeBtn.disabled = tailorInProgress || autoApplyInProgress;
+  els.previewResumeBtn.disabled = tailorInProgress || autoApplyInProgress;
+  els.autoApplyBtn.disabled = tailorInProgress || autoApplyInProgress;
 
   if (tailorInProgress) {
     els.tailorBtn.classList.add("busy");
@@ -431,6 +532,65 @@ async function onPreviewTailoredResume() {
   }
 }
 
+async function onAutoApplyJob() {
+  const structured = tailoredEditor.getStructured();
+  const resumeText = tailoredEditor.getText().trim();
+
+  if (!resumeText) {
+    setStatus("Tailor a resume first, then try Auto Apply.", "error");
+    updateApplicationActionButton();
+    return;
+  }
+
+  const browserTab = await getActiveBrowserTab();
+  if (!browserTab) {
+    setStatus("No active browser tab found.", "error");
+    return;
+  }
+
+  autoApplyInProgress = true;
+  updateApplicationActionButton();
+  setStatus("Auto Apply started — ChatGPT is planning form actions…");
+
+  try {
+    await ensurePageAccess();
+    const response = await sendBackgroundMessage(
+      {
+        type: "AUTO_APPLY_JOB",
+        payload: {
+          structured,
+          companyName: els.companyName.value.trim(),
+          position: getApplicationPosition(),
+          jobUrl: els.jobUrl.value.trim(),
+          jobDescription: els.jobDescription.value.trim(),
+          jobWindowId: browserTab.windowId,
+        },
+      },
+      AUTO_APPLY_TIMEOUT_MS
+    );
+
+    if (response === undefined) {
+      throw new Error(
+        "Lost connection to the extension background. Reload cApply in chrome://extensions and try again."
+      );
+    }
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Auto Apply failed.");
+    }
+
+    setStatus(
+      response.summary || "Auto Apply completed on the job page.",
+      "success"
+    );
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    autoApplyInProgress = false;
+    updateApplicationActionButton();
+  }
+}
+
 async function onNewApplication() {
   if (tailorInProgress) {
     setStatus("Wait for tailoring to finish.", "error");
@@ -470,6 +630,52 @@ async function onNewApplication() {
   els.jobDescription.focus();
 }
 
+async function onRefreshApplication() {
+  if (tailorInProgress || autoApplyInProgress) {
+    setStatus("Wait for the current operation to finish.", "error");
+    return;
+  }
+
+  setStatus("Refreshing from current page…");
+  els.refreshApplicationBtn.disabled = true;
+
+  try {
+    const tab = await getActiveBrowserTab();
+    if (
+      tab?.url &&
+      !tab.url.startsWith("chrome") &&
+      !tab.url.startsWith("edge") &&
+      !tab.url.startsWith("about:")
+    ) {
+      els.jobUrl.value = tab.url;
+    }
+
+    await ensurePageAccess();
+    const response = await chrome.runtime.sendMessage({ type: "GRAB_PAGE_TEXT" });
+    if (!response?.ok) throw new Error(response?.error || "Failed to refresh from page");
+
+    els.jobDescription.value = response.text;
+    if (response.pageUrl) {
+      els.jobUrl.value = response.pageUrl;
+    }
+    if (response.meta) {
+      if (response.meta.companyName) els.companyName.value = response.meta.companyName;
+      if (response.meta.position) els.position.value = response.meta.position;
+      if (response.meta.applyUrl) els.jobUrl.value = response.meta.applyUrl;
+    }
+
+    latestAtsFromAi = null;
+    await persistJobContext();
+    updateAtsScore();
+    renderAnalysis();
+    setStatus("Application refreshed from the current page.", "success");
+  } catch (err) {
+    setStatus(err.message, "error");
+  } finally {
+    els.refreshApplicationBtn.disabled = tailorInProgress || autoApplyInProgress;
+  }
+}
+
 /** @type {number | null} */
 let activeBrowserTabId = null;
 
@@ -477,14 +683,20 @@ async function flushJobContextSave() {
   window.clearTimeout(jobContextTimer);
   window.clearTimeout(atsUpdateTimer);
 
-  if (!activeJobContextKey) activeJobContextKey = getJobContextKey();
+  if (!activeJobContextKey) activeJobContextKey = await resolveContextKey();
   await saveJobContext(activeJobContextKey, collectApplicationState());
+}
+
+async function resolveContextKey() {
+  const tab = await getActiveBrowserTab();
+  const url = els.jobUrl.value.trim() || tab?.url || "";
+  return getJobContextKey(url, tab?.tabId ?? activeBrowserTabId ?? undefined);
 }
 
 async function persistJobContext(contextKey = activeJobContextKey) {
   window.clearTimeout(jobContextTimer);
 
-  let key = contextKey || getJobContextKey();
+  let key = contextKey || (await resolveContextKey());
   if (!contextKey) {
     const tab = await getActiveBrowserTab();
     if (tab) activeBrowserTabId = tab.tabId;
@@ -507,10 +719,16 @@ function onApplicationInput() {
   }
   scheduleAtsScoreUpdate();
   scheduleJobContextSave();
+  if (!els.tabPanels.analysis.hidden) {
+    renderAnalysis();
+  }
 }
 
 function setActiveTab(tabId) {
   if (!TAB_IDS.includes(tabId)) return;
+
+  lastMainTab = tabId;
+  hideSettingsPanel(false);
 
   els.mainTabs.forEach((tab) => {
     const isActive = tab.dataset.tab === tabId;
@@ -527,11 +745,197 @@ function setActiveTab(tabId) {
 
   if (tabId === "application") {
     updateAtsScore();
+    updateCoverLetterVisibility();
   }
 
   if (tabId === "history") {
     renderHistory();
   }
+
+  if (tabId === "analysis") {
+    renderAnalysis();
+  }
+}
+
+function getCurrentMainTab() {
+  const active = [...els.mainTabs].find((tab) => tab.classList.contains("active"));
+  return active?.dataset.tab || lastMainTab;
+}
+
+/**
+ * @param {boolean} [restoreTab]
+ */
+function hideSettingsPanel(restoreTab = true) {
+  if (!els.settingsPanel) return;
+  els.settingsPanel.hidden = true;
+  els.settingsPanel.classList.remove("active");
+  if (restoreTab) setActiveTab(lastMainTab);
+}
+
+function showSettingsPanel() {
+  lastMainTab = getCurrentMainTab();
+  TAB_IDS.forEach((id) => {
+    els.tabPanels[id].hidden = true;
+    els.tabPanels[id].classList.remove("active");
+  });
+  els.mainTabs.forEach((tab) => {
+    tab.classList.remove("active");
+    tab.setAttribute("aria-selected", "false");
+  });
+  els.settingsPanel.hidden = false;
+  els.settingsPanel.classList.add("active");
+  if (appSettings) applySettingsToForm(appSettings);
+}
+
+/**
+ * @param {import("../lib/settings.js").AppSettings} settings
+ */
+function applySettingsToForm(settings) {
+  els.tone.value = settings.defaultTone;
+  els.outputFormat.value = settings.defaultOutputFormat;
+  els.autoSend.checked = settings.autoSend;
+  els.settingsDefaultTone.value = settings.defaultTone;
+  els.settingsDefaultOutput.value = settings.defaultOutputFormat;
+  els.settingsAutoSend.checked = settings.autoSend;
+  els.settingsHybridAutoApply.checked = settings.hybridAutoApply;
+  els.settingsUseOpenAiApi.checked = settings.useOpenAiApi;
+  els.settingsOpenAiModel.value = settings.openAiModel;
+  els.settingsOpenAiApiKey.value = settings.openAiApiKey;
+}
+
+async function onSaveSettings() {
+  appSettings = await saveSettings({
+    defaultTone: els.settingsDefaultTone.value,
+    defaultOutputFormat: els.settingsDefaultOutput.value,
+    autoSend: els.settingsAutoSend.checked,
+    hybridAutoApply: els.settingsHybridAutoApply.checked,
+    useOpenAiApi: els.settingsUseOpenAiApi.checked,
+    openAiModel: els.settingsOpenAiModel.value.trim() || "gpt-4o-mini",
+    openAiApiKey: els.settingsOpenAiApiKey.value.trim(),
+  });
+  applySettingsToForm(appSettings);
+  els.settingsStatus.textContent = "Settings saved.";
+  els.settingsStatus.className = "status success";
+}
+
+function updateCoverLetterVisibility() {
+  const wantsCoverLetter = els.outputFormat.value === "cover letter + resume";
+  const hasLetter = Boolean(latestCoverLetter.trim() || els.coverLetter.value.trim());
+  els.coverLetterSection.hidden = !(wantsCoverLetter || hasLetter);
+}
+
+function onCopyCoverLetter() {
+  const text = els.coverLetter.value.trim();
+  if (!text) {
+    setStatus("No cover letter to copy.", "error");
+    return;
+  }
+  navigator.clipboard.writeText(text).then(
+    () => setStatus("Cover letter copied.", "success"),
+    () => setStatus("Could not copy cover letter.", "error")
+  );
+}
+
+function fillAnalysisList(listEl, items, emptyText) {
+  listEl.innerHTML = "";
+  if (!items.length) {
+    const item = document.createElement("li");
+    item.textContent = emptyText;
+    listEl.appendChild(item);
+    return;
+  }
+  for (const text of items) {
+    const item = document.createElement("li");
+    item.textContent = text;
+    listEl.appendChild(item);
+  }
+}
+
+function renderAnalysis() {
+  const profileResume = serializeResume(profileEditor.getStructured());
+  const jobDescription = els.jobDescription.value.trim();
+  const report = buildAnalysisReport(jobDescription, profileResume);
+
+  if (!jobDescription || !profileResume.trim()) {
+    els.analysisEmpty.hidden = false;
+    els.analysisReport.hidden = true;
+    return;
+  }
+
+  els.analysisEmpty.hidden = true;
+  els.analysisReport.hidden = false;
+
+  const tier = scoreTier(report.score);
+  els.analysisScoreValue.textContent = String(report.score);
+  els.analysisScoreRing.className = `ats-score-ring tier-${tier}`;
+  els.analysisSummary.textContent = report.summary;
+  els.analysisTarget.textContent = `Target: ${report.target}% keyword overlap`;
+
+  fillAnalysisList(
+    els.analysisRecommendations,
+    report.recommendations,
+    "No recommendations yet."
+  );
+  fillAnalysisList(els.analysisFixableGaps, report.fixableGaps, "No fixable gaps detected.");
+  fillAnalysisList(
+    els.analysisUnsupportedGaps,
+    report.unsupportedGaps,
+    "No unsupported gaps listed."
+  );
+
+  els.analysisPriorityKeywords.innerHTML = "";
+  for (const keyword of report.priorityKeywords) {
+    const tag = document.createElement("li");
+    tag.textContent = keyword;
+    els.analysisPriorityKeywords.appendChild(tag);
+  }
+}
+
+async function onExportHistory() {
+  const history = await loadTailorHistory();
+  const csv = exportHistoryCsv(history);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `capply-jobs-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function maybeShowOnboarding() {
+  if (!(await shouldShowOnboarding())) return;
+  onboardingStepIndex = 0;
+  renderOnboardingStep();
+  els.onboardingOverlay.hidden = false;
+}
+
+function renderOnboardingStep() {
+  const step = ONBOARDING_STEPS[onboardingStepIndex];
+  if (!step) return;
+  els.onboardingStepLabel.textContent = `Step ${onboardingStepIndex + 1} of ${ONBOARDING_STEPS.length}`;
+  els.onboardingTitle.textContent = step.title;
+  els.onboardingBody.textContent = step.body;
+  els.onboardingNextBtn.textContent =
+    onboardingStepIndex === ONBOARDING_STEPS.length - 1 ? "Get started" : "Next";
+}
+
+async function dismissOnboarding() {
+  els.onboardingOverlay.hidden = true;
+  try {
+    await completeOnboarding();
+  } catch {
+    // Still close the overlay even if storage fails.
+  }
+}
+
+async function advanceOnboarding() {
+  if (onboardingStepIndex >= ONBOARDING_STEPS.length - 1) {
+    await dismissOnboarding();
+    return;
+  }
+  onboardingStepIndex += 1;
+  renderOnboardingStep();
 }
 
 function setStatus(message, type = "") {
@@ -625,8 +1029,12 @@ async function openHistoryEntry(entry) {
   els.companyName.value = entry.companyName || "";
   els.position.value = entry.position?.trim() || historyEntryPosition(entry);
   els.jobUrl.value = entry.jobUrl || "";
+  latestCoverLetter = entry.coverLetter || "";
+  els.coverLetter.value = latestCoverLetter;
+  updateCoverLetterVisibility();
   showTailoredResume(entry.structured, entry.changes, entry.atsScore);
-  await persistJobContext();
+  activeJobContextKey = getJobContextKey(entry.jobUrl || "", undefined);
+  await persistJobContext(activeJobContextKey);
   setActiveTab("application");
   setStatus("");
 }
@@ -714,12 +1122,34 @@ function matchesHistorySearch(entry, companyQuery, positionQuery) {
   return true;
 }
 
+/**
+ * @param {import("../lib/tailor-history.js").JobStatus | string | undefined} tabId
+ */
+function setActiveJobsTab(tabId) {
+  const status =
+    tabId && tabId in JOBS_EMPTY_MESSAGES
+      ? /** @type {import("../lib/tailor-history.js").JobStatus} */ (tabId)
+      : "saved";
+  activeJobsTab = status;
+
+  els.jobsTabs.forEach((tab) => {
+    const isActive = tab.dataset.jobsTab === status;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", String(isActive));
+  });
+
+  renderHistory();
+}
+
 async function renderHistory() {
   const history = await loadTailorHistory();
+  const stats = await getHistoryStats();
   const companyQuery = els.historyCompanySearch.value.trim();
   const positionQuery = els.historyPositionSearch.value.trim();
-  const filtered = history.filter((entry) =>
-    matchesHistorySearch(entry, companyQuery, positionQuery)
+  const filtered = history.filter(
+    (entry) =>
+      getEntryStatus(entry) === activeJobsTab &&
+      matchesHistorySearch(entry, companyQuery, positionQuery)
   );
 
   els.historyList.innerHTML = "";
@@ -728,18 +1158,36 @@ async function renderHistory() {
   const hasFilters = Boolean(companyQuery || positionQuery);
   els.historySearch.hidden = !hasHistory;
   els.clearHistory.hidden = !hasHistory;
+  els.exportHistoryBtn.hidden = !hasHistory;
+
+  if (hasHistory) {
+    els.historyStats.hidden = false;
+    els.historyStats.innerHTML = [
+      `<span class="history-stat">${stats.total} total</span>`,
+      `<span class="history-stat">${stats.saved} saved</span>`,
+      `<span class="history-stat">${stats.applied} applied</span>`,
+      `<span class="history-stat">${stats.interview} interviews</span>`,
+      stats.avgScore != null
+        ? `<span class="history-stat">${stats.avgScore}% avg ATS</span>`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("");
+  } else {
+    els.historyStats.hidden = true;
+    els.historyStats.innerHTML = "";
+  }
 
   if (!hasHistory) {
-    els.historyEmpty.textContent =
-      "No tailor sessions yet. Tailor a resume on the Application tab.";
+    els.historyEmpty.textContent = JOBS_EMPTY_MESSAGES[activeJobsTab];
     els.historyEmpty.hidden = false;
     return;
   }
 
   if (filtered.length === 0) {
     els.historyEmpty.textContent = hasFilters
-      ? "No matching tailor sessions."
-      : "No tailor sessions yet. Tailor a resume on the Application tab.";
+      ? `No matching jobs in ${activeJobsTab}.`
+      : JOBS_EMPTY_MESSAGES[activeJobsTab];
     els.historyEmpty.hidden = false;
     return;
   }
@@ -780,12 +1228,23 @@ async function renderHistory() {
       header.appendChild(score);
     }
 
+    if (entry.appliedAt) {
+      const appliedDate = document.createElement("span");
+      appliedDate.className = "history-date";
+      appliedDate.textContent = `Applied ${formatHistoryDate(entry.appliedAt)}`;
+      header.appendChild(appliedDate);
+    }
+
     const appliedToggle = document.createElement("button");
     appliedToggle.type = "button";
-    appliedToggle.className = `history-applied-toggle${entry.applied ? " is-applied" : ""}`;
+    const status = getEntryStatus(entry);
+    appliedToggle.className = `history-applied-toggle${status === "applied" ? " is-applied" : ""}`;
     appliedToggle.dataset.action = "toggle-applied";
-    appliedToggle.setAttribute("aria-pressed", String(Boolean(entry.applied)));
-    appliedToggle.textContent = entry.applied ? "✓ Applied" : "Mark applied";
+    appliedToggle.setAttribute("aria-pressed", String(status === "applied"));
+    appliedToggle.textContent = status === "applied" ? "✓ Applied" : "Mark applied";
+    if (status !== "saved" && status !== "applied") {
+      appliedToggle.hidden = true;
+    }
     header.appendChild(appliedToggle);
 
     const title = document.createElement("p");
@@ -836,7 +1295,45 @@ async function renderHistory() {
     deleteBtn.dataset.action = "delete";
     deleteBtn.textContent = "Delete";
 
-    actions.append(editBtn, openBtn, deleteBtn);
+    if (status === "saved") {
+      const archiveBtn = document.createElement("button");
+      archiveBtn.type = "button";
+      archiveBtn.className = "link-btn";
+      archiveBtn.dataset.action = "set-status";
+      archiveBtn.dataset.status = "archived";
+      archiveBtn.textContent = "Archive";
+      actions.append(editBtn, openBtn, archiveBtn, deleteBtn);
+    } else if (status === "applied") {
+      const interviewBtn = document.createElement("button");
+      interviewBtn.type = "button";
+      interviewBtn.className = "link-btn";
+      interviewBtn.dataset.action = "set-status";
+      interviewBtn.dataset.status = "interview";
+      interviewBtn.textContent = "Interview";
+      const archiveBtn = document.createElement("button");
+      archiveBtn.type = "button";
+      archiveBtn.className = "link-btn";
+      archiveBtn.dataset.action = "set-status";
+      archiveBtn.dataset.status = "archived";
+      archiveBtn.textContent = "Archive";
+      actions.append(editBtn, openBtn, interviewBtn, archiveBtn, deleteBtn);
+    } else if (status === "interview") {
+      const archiveBtn = document.createElement("button");
+      archiveBtn.type = "button";
+      archiveBtn.className = "link-btn";
+      archiveBtn.dataset.action = "set-status";
+      archiveBtn.dataset.status = "archived";
+      archiveBtn.textContent = "Archive";
+      actions.append(editBtn, openBtn, archiveBtn, deleteBtn);
+    } else {
+      const restoreBtn = document.createElement("button");
+      restoreBtn.type = "button";
+      restoreBtn.className = "link-btn";
+      restoreBtn.dataset.action = "set-status";
+      restoreBtn.dataset.status = "saved";
+      restoreBtn.textContent = "Restore";
+      actions.append(editBtn, openBtn, restoreBtn, deleteBtn);
+    }
 
     const details = document.createElement("details");
     details.className = "history-details";
@@ -859,6 +1356,20 @@ async function renderHistory() {
       }
       details.appendChild(changesList);
     }
+
+    const notesLabel = document.createElement("label");
+    notesLabel.textContent = "Notes";
+    notesLabel.className = "field-hint";
+    const notesField = document.createElement("textarea");
+    notesField.className = "history-notes";
+    notesField.value = entry.notes || "";
+    notesField.placeholder = "Interview date, recruiter name, follow-up notes…";
+    notesField.dataset.historyId = entry.id;
+    notesField.addEventListener("change", async (event) => {
+      const target = /** @type {HTMLTextAreaElement} */ (event.target);
+      await setTailorHistoryNotes(target.dataset.historyId || entry.id, target.value);
+    });
+    details.append(notesLabel, notesField);
 
     content.append(header, title, preview, actions, details);
     body.append(logo, content);
@@ -888,6 +1399,18 @@ async function onHistoryListClick(event) {
     return;
   }
 
+  if (button.dataset.action === "set-status") {
+    const status = button.dataset.status;
+    if (status) {
+      await setTailorHistoryStatus(
+        id,
+        /** @type {import("../lib/tailor-history.js").JobStatus} */ (status)
+      );
+      await renderHistory();
+    }
+    return;
+  }
+
   if (button.dataset.action === "delete") {
     await removeTailorHistoryEntry(id);
     await renderHistory();
@@ -908,6 +1431,7 @@ async function recordTailorHistory({
   companyName,
   position,
   jobUrl,
+  coverLetter = "",
 }) {
   const resumeText = serializeResume(structured);
   if (!resumeText.trim()) return;
@@ -921,6 +1445,7 @@ async function recordTailorHistory({
     structured,
     changes,
     atsScore,
+    coverLetter,
   });
   await renderHistory();
 }
@@ -984,6 +1509,17 @@ async function onGrabFromPage() {
     els.jobDescription.value = response.text;
     if (response.pageUrl && !els.jobUrl.value.trim()) {
       els.jobUrl.value = response.pageUrl;
+    }
+    if (response.meta) {
+      if (response.meta.companyName && !els.companyName.value.trim()) {
+        els.companyName.value = response.meta.companyName;
+      }
+      if (response.meta.position && !els.position.value.trim()) {
+        els.position.value = response.meta.position;
+      }
+      if (response.meta.applyUrl && !els.jobUrl.value.trim()) {
+        els.jobUrl.value = response.meta.applyUrl;
+      }
     }
     latestAtsFromAi = null;
     await persistJobContext();
@@ -1080,6 +1616,7 @@ function setTailorBusy(busy) {
     els.tailorBtn.disabled = true;
     els.downloadResumeBtn.disabled = true;
     els.previewResumeBtn.disabled = true;
+    els.autoApplyBtn.disabled = true;
     els.tailorBtn.classList.add("busy");
     els.tailorBtn.setAttribute("aria-busy", "true");
     setTailorBtnLabel("Tailoring…");
@@ -1161,7 +1698,7 @@ async function onTailor() {
     if (!response?.ok) throw new Error(response?.error || "Something went wrong");
 
     if (response.responseText?.trim()) {
-      const { structured, changes, atsScore } = parseTailorResponse(
+      const { structured, changes, atsScore, coverLetter } = parseTailorResponse(
         response.responseText
       );
       if (!hasResumeContent(structured)) {
@@ -1177,6 +1714,9 @@ async function onTailor() {
         { targetRole: getApplicationPosition() }
       );
       const displayAts = buildDisplayAtsScore(enriched, jobDescription, resume, atsScore);
+      latestCoverLetter = coverLetter || "";
+      els.coverLetter.value = latestCoverLetter;
+      updateCoverLetterVisibility();
       showTailoredResume(enriched, changes, displayAts);
       activeJobContextKey = tailorSession.contextKey;
       activeBrowserTabId = tailorSession.tabId;
@@ -1196,6 +1736,7 @@ async function onTailor() {
         companyName: els.companyName.value.trim(),
         position: els.position.value.trim(),
         jobUrl: els.jobUrl.value.trim(),
+        coverLetter: latestCoverLetter,
       });
       activeJobContextKey = tailorSession.contextKey;
       activeBrowserTabId = tailorSession.tabId;

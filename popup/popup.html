@@ -8,11 +8,24 @@
 </head>
 <body>
   <header>
-    <h1>cApply</h1>
-    <p class="subtitle">Tailor your resume with ChatGPT</p>
+    <div class="header-top">
+      <div class="brand">
+        <img src="../icons/logo-mark.svg" alt="" class="brand-mark" width="32" height="32" />
+        <div class="brand-copy">
+          <h1>cApply</h1>
+          <p class="subtitle">Tailor your resume with ChatGPT</p>
+        </div>
+      </div>
+      <button type="button" id="settingsBtn" class="header-settings-btn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        </svg>
+      </button>
+    </div>
     <nav class="main-tabs" role="tablist" aria-label="Main sections">
       <button type="button" class="main-tab active" role="tab" id="tab-application" aria-selected="true" aria-controls="panel-application" data-tab="application">Application</button>
-      <button type="button" class="main-tab" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history" data-tab="history">History</button>
+      <button type="button" class="main-tab" role="tab" id="tab-history" aria-selected="false" aria-controls="panel-history" data-tab="history">My jobs</button>
       <button type="button" class="main-tab" role="tab" id="tab-analysis" aria-selected="false" aria-controls="panel-analysis" data-tab="analysis">Analysis</button>
       <button type="button" class="main-tab" role="tab" id="tab-profile" aria-selected="false" aria-controls="panel-profile" data-tab="profile">Profile</button>
     </nav>
@@ -45,6 +58,29 @@
 
   <main id="panel-application" class="tab-panel active" role="tabpanel" aria-labelledby="tab-application">
     <section class="field job-field">
+      <div class="application-new-action">
+        <button type="button" id="newApplicationBtn" class="primary action-btn">
+          <span class="action-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <path d="M14 2v6h6" />
+              <path d="M12 11v6" />
+              <path d="M9 14h6" />
+            </svg>
+          </span>
+          <span class="action-btn-label">New</span>
+        </button>
+        <button type="button" id="refreshApplicationBtn" class="primary action-btn">
+          <span class="action-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </span>
+          <span class="action-btn-label">Refresh</span>
+        </button>
+      </div>
+
       <div class="application-meta-grid">
         <label>
           Job URL
@@ -88,7 +124,7 @@
           </label>
           <label class="checkbox">
             <input type="checkbox" id="autoSend" checked />
-            Auto-send to ChatGPT
+            <span class="checkbox-text">Auto-send to ChatGPT</span>
           </label>
         </div>
         <label class="full-width">
@@ -98,26 +134,52 @@
       </details>
 
       <div class="application-actions">
-        <button type="button" id="newApplicationBtn" class="primary">New</button>
         <button
           type="button"
           id="tailorBtn"
-          class="primary tailor-btn"
+          class="primary action-btn tailor-btn"
           data-tailor-label="Tailor"
           data-retailor-label="Re-tailor"
         >
-          <span class="tailor-btn-icon" aria-hidden="true">
+          <span class="action-btn-icon tailor-btn-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
               <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142-.0852 4.783-2.7582a.7712.7712 0 0 0 .7806 0l5.8428 3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
             </svg>
           </span>
-          <span class="tailor-btn-label">Tailor</span>
+          <span class="action-btn-label tailor-btn-label">Tailor</span>
         </button>
       </div>
 
       <div id="applicationActionsSecondary" class="application-actions application-actions-secondary" hidden>
-        <button type="button" id="downloadResumeBtn" class="primary">Download resume</button>
-        <button type="button" id="previewResumeBtn" class="primary">Preview resume</button>
+        <button type="button" id="autoApplyBtn" class="primary action-btn">
+          <span class="action-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 12h14" />
+              <path d="m12 5 7 7-7 7" />
+              <path d="M19 5v4a2 2 0 0 1-2 2h-3" />
+            </svg>
+          </span>
+          <span class="action-btn-label">Auto Apply</span>
+        </button>
+        <button type="button" id="downloadResumeBtn" class="primary action-btn">
+          <span class="action-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v12" />
+              <path d="m7 10 5 5 5-5" />
+              <path d="M5 21h14" />
+            </svg>
+          </span>
+          <span class="action-btn-label">Download resume</span>
+        </button>
+        <button type="button" id="previewResumeBtn" class="primary action-btn">
+          <span class="action-btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </span>
+          <span class="action-btn-label">Preview resume</span>
+        </button>
       </div>
 
       <section id="atsScoreSection" class="field ats-score-section" hidden>
@@ -141,6 +203,14 @@
         </div>
       </section>
 
+      <section id="coverLetterSection" class="field cover-letter-section" hidden>
+        <div class="field-header">
+          <label for="coverLetter">Cover letter</label>
+          <button type="button" id="copyCoverLetterBtn" class="link-btn">Copy</button>
+        </div>
+        <textarea id="coverLetter" rows="8" placeholder="Tailored cover letter appears here when requested in Options…"></textarea>
+      </section>
+
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </section>
 
@@ -155,9 +225,19 @@
   <main id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
     <section class="history-panel">
       <div class="field-header">
-        <label>Tailor history</label>
-        <button type="button" id="clearHistory" class="link-btn" hidden>Clear all</button>
+        <label>My jobs</label>
+        <div class="history-header-actions">
+          <button type="button" id="exportHistoryBtn" class="link-btn" hidden>Export CSV</button>
+          <button type="button" id="clearHistory" class="link-btn" hidden>Clear all</button>
+        </div>
       </div>
+      <div id="historyStats" class="history-stats" hidden></div>
+      <nav class="jobs-tabs" role="tablist" aria-label="Job status">
+        <button type="button" class="jobs-tab active" role="tab" id="jobs-tab-saved" aria-selected="true" aria-controls="jobs-panel-saved" data-jobs-tab="saved">Saved</button>
+        <button type="button" class="jobs-tab" role="tab" id="jobs-tab-applied" aria-selected="false" aria-controls="jobs-panel-applied" data-jobs-tab="applied">Applied</button>
+        <button type="button" class="jobs-tab" role="tab" id="jobs-tab-interview" aria-selected="false" aria-controls="jobs-panel-interview" data-jobs-tab="interview">Interviews</button>
+        <button type="button" class="jobs-tab" role="tab" id="jobs-tab-archived" aria-selected="false" aria-controls="jobs-panel-archived" data-jobs-tab="archived">Archived</button>
+      </nav>
       <div id="historySearch" class="history-search" hidden>
         <div class="history-search-field">
           <svg class="history-search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -186,17 +266,115 @@
           />
         </div>
       </div>
-      <p id="historyEmpty" class="field-hint">No tailor sessions yet. Tailor a resume on the Application tab.</p>
+      <p id="historyEmpty" class="field-hint">No saved jobs yet. Tailor a resume on the Application tab.</p>
       <ul id="historyList" class="history-list"></ul>
     </section>
   </main>
 
   <main id="panel-analysis" class="tab-panel" role="tabpanel" aria-labelledby="tab-analysis" hidden>
-    <section class="tab-placeholder">
-      <p class="placeholder-title">Analysis</p>
-      <p class="placeholder-text">Resume and job match insights will appear here.</p>
+    <section class="analysis-panel">
+      <div class="field-header">
+        <label>Match analysis</label>
+        <button type="button" id="refreshAnalysisBtn" class="link-btn">Refresh</button>
+      </div>
+      <p class="field-hint">Compare your profile resume against the current job description.</p>
+      <div id="analysisEmpty" class="analysis-empty">
+        Add a job description on Application to see keyword gaps and recommendations.
+      </div>
+      <div id="analysisReport" class="analysis-report" hidden>
+        <div class="analysis-score-card">
+          <div id="analysisScoreRing" class="ats-score-ring">
+            <span id="analysisScoreValue" class="ats-score-value">—</span>
+            <span class="ats-score-unit">%</span>
+          </div>
+          <div class="analysis-score-copy">
+            <p id="analysisSummary" class="analysis-summary"></p>
+            <p id="analysisTarget" class="analysis-target"></p>
+          </div>
+        </div>
+        <div class="analysis-section">
+          <h3>Recommendations</h3>
+          <ul id="analysisRecommendations" class="analysis-list"></ul>
+        </div>
+        <div class="analysis-section">
+          <h3>Fixable gaps</h3>
+          <ul id="analysisFixableGaps" class="analysis-list"></ul>
+        </div>
+        <div class="analysis-section">
+          <h3>Honest gaps</h3>
+          <ul id="analysisUnsupportedGaps" class="analysis-list"></ul>
+        </div>
+        <div class="analysis-section">
+          <h3>Priority keywords</h3>
+          <ul id="analysisPriorityKeywords" class="analysis-tags"></ul>
+        </div>
+      </div>
     </section>
   </main>
+
+  <main id="panel-settings" class="tab-panel tab-panel-fill" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <section class="settings-panel">
+      <div class="field-header">
+        <label>Settings</label>
+        <button type="button" id="closeSettingsBtn" class="link-btn">Close</button>
+      </div>
+      <div class="settings-grid">
+        <label>
+          Default tone
+          <select id="settingsDefaultTone">
+            <option value="professional">Professional</option>
+            <option value="concise">Concise</option>
+            <option value="executive">Executive</option>
+            <option value="friendly">Friendly</option>
+          </select>
+        </label>
+        <label>
+          Default output
+          <select id="settingsDefaultOutput">
+            <option value="full resume">Full resume</option>
+            <option value="resume bullets only">Bullets only</option>
+            <option value="cover letter + resume">Cover letter + resume</option>
+          </select>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="settingsAutoSend" />
+          <span class="checkbox-text">Auto-send to ChatGPT by default</span>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="settingsHybridAutoApply" />
+          <span class="checkbox-text">Hybrid auto-apply (platform rules before ChatGPT)</span>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="settingsUseOpenAiApi" />
+          <span class="checkbox-text">Use OpenAI API instead of ChatGPT web</span>
+        </label>
+        <label>
+          OpenAI model
+          <input type="text" id="settingsOpenAiModel" placeholder="gpt-4o-mini" />
+        </label>
+        <label class="full-width">
+          OpenAI API key
+          <input type="password" id="settingsOpenAiApiKey" placeholder="sk-…" autocomplete="off" />
+        </label>
+      </div>
+      <div class="settings-actions">
+        <button type="button" id="saveSettingsBtn" class="primary profile-action-btn">Save settings</button>
+      </div>
+      <p id="settingsStatus" class="status" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <div id="onboardingOverlay" class="onboarding-overlay" hidden>
+    <div class="onboarding-card" role="dialog" aria-labelledby="onboardingTitle">
+      <p class="onboarding-step-label" id="onboardingStepLabel">Step 1 of 3</p>
+      <h2 id="onboardingTitle">Welcome to cApply</h2>
+      <p id="onboardingBody" class="onboarding-body"></p>
+      <div class="onboarding-actions">
+        <button type="button" id="onboardingSkipBtn" class="link-btn">Skip</button>
+        <button type="button" id="onboardingNextBtn" class="primary profile-action-btn">Next</button>
+      </div>
+    </div>
+  </div>
 
   <script src="../lib/jspdf/jspdf.umd.min.js"></script>
   <script type="module" src="popup.js"></script>

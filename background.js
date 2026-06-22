@@ -1,9 +1,21 @@
-import { buildFillProfilePrompt, buildTailorPrompt } from "./lib/prompt.js";
+import { buildFillProfilePrompt, buildTailorPrompt, buildAutoApplyPrompt } from "./lib/prompt.js";
 import { parseTailorResponse } from "./lib/tailor-response.js";
-import { serializeResume } from "./lib/resume-structure.js";
-import { encodeResumePdfBase64 } from "./lib/resume-pdf.js";
-import { loadJobContext, SHARED_CONTEXT_KEY } from "./lib/job-context.js";
+import {
+  autoApplyResponseLooksComplete,
+  hasAutoApplyMarkers,
+  isUsableAutoApplyResponse,
+  parseAutoApplyResponse,
+} from "./lib/auto-apply-response.js";
+import { serializeResume, resumeToLlmShape } from "./lib/resume-structure.js";
+import {
+  buildResumeDownloadFilename,
+  encodeResumePdfBase64,
+} from "./lib/resume-pdf.js";
+import { loadJobContext, ACTIVE_CONTEXT_KEY, SHARED_CONTEXT_KEY } from "./lib/job-context.js";
 import { inferJobRole } from "./lib/tailor-history.js";
+import { loadSettings } from "./lib/settings.js";
+import { callOpenAiChat } from "./lib/openai-api.js";
+import { getHybridAutoApplySteps } from "./lib/auto-apply-hybrid.js";
 import "./lib/jspdf/jspdf.umd.min.js";
 
 const CHATGPT_URL = "https://chatgpt.com/";
@@ -73,6 +85,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
+
+  if (message.type === "AUTO_APPLY_JOB") {
+    handleAutoApplyJob(message.payload)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
 });
 
 async function handlePreviewResumeOnPage(message) {
@@ -126,7 +145,9 @@ async function handlePreviewResumeOnPage(message) {
 }
 
 async function handleRefreshResumePreview() {
-  const state = await loadJobContext(SHARED_CONTEXT_KEY);
+  const stored = await chrome.storage.local.get(ACTIVE_CONTEXT_KEY);
+  const contextKey = stored[ACTIVE_CONTEXT_KEY] || SHARED_CONTEXT_KEY;
+  const state = await loadJobContext(contextKey);
   const structured = state?.structured;
 
   if (!structured || !serializeResume(structured).trim()) {
@@ -175,14 +196,371 @@ async function handleGrabPageText() {
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => window.__cApplyGrabbedText,
+    func: () => ({
+      text: window.__cApplyGrabbedText,
+      meta: window.__cApplyGrabbedMeta || null,
+    }),
   });
 
-  if (!result?.trim()) {
+  const text = result?.text?.trim();
+  if (!text) {
     throw new Error("Could not extract text from this page.");
   }
 
-  return { ok: true, text: result, pageUrl: url };
+  return { ok: true, text, meta: result?.meta || null, pageUrl: url };
+}
+
+const AUTO_APPLY_MAX_ROUNDS = 8;
+
+async function handleAutoApplyJob(payload) {
+  const {
+    structured,
+    companyName = "",
+    position = "",
+    jobUrl = "",
+    jobDescription = "",
+    jobWindowId,
+  } = payload || {};
+
+  if (!structured || !serializeResume(structured).trim()) {
+    throw new Error("Tailor a resume first, then try Auto Apply.");
+  }
+
+  const [jobTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const jobTabId = jobTab?.id;
+  const pageUrl = jobTab?.url || "";
+
+  if (!jobTabId) {
+    throw new Error("No active browser tab. Open the job posting page first.");
+  }
+
+  if (
+    pageUrl.startsWith("chrome://") ||
+    pageUrl.startsWith("chrome-extension://") ||
+    pageUrl.startsWith("edge://") ||
+    pageUrl.startsWith("about:")
+  ) {
+    throw new Error("Open the job posting page in the browser, then click Auto Apply.");
+  }
+
+  if (CHATGPT_HOSTS.some((h) => pageUrl.includes(h))) {
+    throw new Error("Switch to the job posting tab first, then click Auto Apply.");
+  }
+
+  const hasAccess = await chrome.permissions.contains({
+    origins: ["https://*/*", "http://*/*"],
+  });
+
+  if (!hasAccess) {
+    throw new Error(
+      "Page access not granted. Click Auto Apply again and allow permission."
+    );
+  }
+
+  const name = structured.contact?.name?.trim() || "Resume";
+  const role = position.trim() || inferJobRole(jobDescription || "");
+  const filename = buildResumeDownloadFilename(name, role);
+  const pdfBase64 = await encodeResumePdfBase64(structured);
+  const applicant = resumeToLlmShape(structured);
+  const job = {
+    companyName: companyName.trim(),
+    position: role,
+    jobUrl: jobUrl.trim() || pageUrl,
+    jobDescription: jobDescription.trim().slice(0, 8000),
+  };
+
+  const settings = await loadSettings();
+  /** @type {Record<string, unknown> | null} */
+  let lastResult = null;
+  let previousSummary = "";
+  /** @type {string[]} */
+  const summaries = [];
+
+  for (let round = 0; round < AUTO_APPLY_MAX_ROUNDS; round += 1) {
+    const snapshot = await captureJobPageSnapshot(jobTabId, applicant);
+
+    if (settings.hybridAutoApply) {
+      const hybridSteps = getHybridAutoApplySteps(pageUrl, snapshot);
+      if (hybridSteps.length) {
+        lastResult = await executeJobPageActions(jobTabId, hybridSteps, {
+          pdfBase64,
+          filename,
+          autoAdvance: true,
+        });
+        if (lastResult.submitted) {
+          return {
+            ok: true,
+            summary: "Application submitted via platform autofill.",
+            rounds: round + 1,
+            submitted: true,
+            summaries: ["Hybrid autofill completed the flow."],
+          };
+        }
+        await sleep(1200);
+      }
+    }
+
+    const prompt = buildAutoApplyPrompt({
+      snapshot,
+      applicant,
+      job,
+      round,
+      previousSummary,
+      lastResult,
+    });
+
+    const responseText = await runAutoApplyChatGPTPrompt(prompt, jobWindowId);
+    const plan = parseAutoApplyResponse(responseText);
+    summaries.push(plan.summary);
+    previousSummary = plan.summary;
+
+    if (plan.status === "blocked") {
+      throw new Error(plan.blocker || plan.summary || "Auto apply blocked on this page.");
+    }
+
+    lastResult = await executeJobPageActions(jobTabId, plan.steps, {
+      pdfBase64,
+      filename,
+      autoAdvance: true,
+    });
+
+    if (plan.status === "done" || lastResult.submitted) {
+      return {
+        ok: true,
+        summary: plan.summary,
+        rounds: round + 1,
+        submitted: true,
+        summaries,
+      };
+    }
+
+    if (!lastResult.ok && lastResult.errors?.length) {
+      throw new Error(lastResult.errors[0]);
+    }
+
+    const tab = await chrome.tabs.get(jobTabId).catch(() => null);
+    const isSmartRecruiters = tab?.url?.includes("smartrecruiters.com");
+    const isOneClickUi = tab?.url?.includes("/oneclick-ui/");
+    await sleep(isOneClickUi ? 4500 : isSmartRecruiters ? 3500 : 2200);
+  }
+
+  throw new Error(
+    "Auto apply did not finish within the step limit. Continue manually on the job page."
+  );
+}
+
+async function captureJobPageSnapshot(tabId, applicant = null) {
+  await ensureJobPageAutomation(tabId);
+
+  const tabMeta = await chrome.tabs.get(tabId).catch(() => null);
+  const isOneClickUi = tabMeta?.url?.includes("/oneclick-ui/");
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async () => window.__cApplyPrepareApplySurface?.(),
+  });
+
+  await sleep(isOneClickUi ? 4000 : 2500);
+  await waitForTabLoad(tabId).catch(() => {});
+  await sleep(isOneClickUi ? 1500 : 1000);
+
+  if (applicant) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: (profile) => window.__cApplyLocalAutofillFromProfile?.(profile),
+      args: [applicant],
+    });
+    await sleep(500);
+  }
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () => window.__cApplyCapturePageSnapshot?.(),
+  });
+
+  if (!result?.elements?.length) {
+    throw new Error(
+      "Could not scan the job page for form fields. Click \"I'm interested\" to open the form, then try Auto Apply again."
+    );
+  }
+
+  return result;
+}
+
+async function executeJobPageActions(tabId, steps, uploadPayload) {
+  await ensureJobPageAutomation(tabId);
+
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (actionSteps, upload) =>
+      window.__cApplyExecuteAutoApplyActions?.(actionSteps, upload),
+    args: [steps, uploadPayload],
+  });
+
+  return (
+    result || {
+      ok: false,
+      completed: [],
+      errors: ["Auto-apply actions did not run."],
+      submitted: false,
+    }
+  );
+}
+
+async function ensureJobPageAutomation(tabId) {
+  const [{ result: ready }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: () =>
+      typeof window.__cApplyCapturePageSnapshot === "function" &&
+      typeof window.__cApplyExecuteAutoApplyActions === "function",
+  });
+
+  if (ready) return;
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    files: ["content/job-apply-automation.js"],
+  });
+
+  await sleep(400);
+}
+
+async function runAutoApplyChatGPTPrompt(prompt, jobWindowId) {
+  const tab = await findOrOpenChatGPTTab(jobWindowId);
+
+  await ensureTabAwake(tab.id);
+  await waitForTabLoad(tab.id);
+  await ensureChatGPTReady(tab.id);
+  await prepareBackgroundChatGPTTab(tab.id);
+  await ensurePageApi(tab.id);
+  await waitForChatGPTReady(tab.id);
+
+  return runAutoApplyPromptWithPolling(tab.id, prompt);
+}
+
+function pickAutoApplyCaptureText(capture) {
+  const stream = capture.streamText || "";
+  const dom = capture.domText || "";
+  const hasNew = Boolean(capture.hasNewAssistant);
+  const inFlight = Boolean(capture.generating || capture.streamStarted);
+
+  if (!hasNew && !inFlight) {
+    if (hasAutoApplyMarkers(dom) && dom.length > 40) return dom;
+    if (hasAutoApplyMarkers(stream) && stream.length > 40) return stream;
+    return "";
+  }
+
+  if (inFlight && !hasNew) return stream;
+  if (dom.includes('"steps"') && dom.length > 80) return dom;
+  if (!stream) return dom;
+  if (!dom) return stream;
+  return dom.length > stream.length ? dom : stream;
+}
+
+async function runAutoApplyPromptWithPolling(tabId, prompt) {
+  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
+
+  const stopKeepalive = startBackgroundKeepalive();
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplyStartKeepalive?.(),
+    });
+
+    const sendResult = await injectAndSend(tabId, prompt);
+    if (!sendResult?.ok || !sendResult.sent) {
+      throw new Error(sendResult?.error || "Could not send auto-apply prompt to ChatGPT.");
+    }
+
+    const assistantCountBefore = sendResult.assistantCountBefore ?? 0;
+
+    const startedDeadline = Date.now() + 20000;
+    while (Date.now() < startedDeadline) {
+      const capture = await pollCapture(tabId, assistantCountBefore);
+      if (
+        capture.streamStarted ||
+        capture.generating ||
+        capture.hasNewAssistant ||
+        capture.streamText
+      ) {
+        break;
+      }
+      await sleep(500);
+    }
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const text = await waitForAutoApplyResponse(tabId, assistantCountBefore);
+      if (text) return text;
+      await sleep(1000);
+    }
+
+    throw new Error("ChatGPT did not return an auto-apply JSON plan.");
+  } finally {
+    stopKeepalive();
+    await chrome.scripting
+      .executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: () => window.__cApplyStopKeepalive?.(),
+      })
+      .catch(() => {});
+    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
+  }
+}
+
+async function waitForAutoApplyResponse(tabId, assistantCountBefore) {
+  const deadline = Date.now() + 180000;
+  let lastText = "";
+  let stableRounds = 0;
+
+  while (Date.now() < deadline) {
+    const capture = await pollCapture(tabId, assistantCountBefore);
+    const candidate = pickAutoApplyCaptureText(capture);
+
+    if (
+      capture.streamError &&
+      !candidate &&
+      !isRecoverableStreamCaptureError(capture.streamError)
+    ) {
+      throw new Error(capture.streamError);
+    }
+
+    if (!candidate || !hasAutoApplyMarkers(candidate) || candidate.length <= 40) {
+      stableRounds = 0;
+      lastText = candidate || "";
+      await sleep(500);
+      continue;
+    }
+
+    if (candidate === lastText) {
+      stableRounds += 1;
+    } else {
+      stableRounds = 0;
+      lastText = candidate;
+    }
+
+    const ready =
+      stableRounds >= (autoApplyResponseLooksComplete(candidate) ? 1 : 2) &&
+      isUsableAutoApplyResponse(candidate);
+
+    if (ready && (!capture.generating || autoApplyResponseLooksComplete(candidate))) {
+      return candidate;
+    }
+
+    await sleep(500);
+  }
+
+  const finalCapture = await pollCapture(tabId, assistantCountBefore);
+  const final = pickAutoApplyCaptureText(finalCapture) || lastText?.trim() || "";
+  return isUsableAutoApplyResponse(final) ? final : "";
 }
 
 async function handleTailorResume(payload) {
@@ -195,8 +573,19 @@ async function handleTailorResume(payload) {
     throw new Error("Job description is empty.");
   }
 
+  const settings = await loadSettings();
   const prompt = buildTailorPrompt({ resume, jobDescription, options });
-  return runChatGPTPrompt(prompt, autoSend, jobWindowId);
+
+  if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
+    const responseText = await callOpenAiChat({
+      apiKey: settings.openAiApiKey,
+      model: settings.openAiModel,
+      prompt,
+    });
+    return { ok: true, sent: true, responseText, source: "openai-api" };
+  }
+
+  return runChatGPTPrompt(prompt, autoSend ?? settings.autoSend, jobWindowId);
 }
 
 async function handleFillProfile(payload) {
