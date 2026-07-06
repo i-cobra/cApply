@@ -1,5 +1,5 @@
 import { buildFillProfilePrompt, buildTailorPrompt, buildAutoApplyPrompt, buildRestructureJobDescriptionPrompt } from "./lib/prompt.js";
-import { parseTailorResponse } from "./lib/tailor-response.js";
+import { parseTailorResponse, hasTailoredContent } from "./lib/tailor-response.js";
 import { parseRestructureJobResponse } from "./lib/restructure-job-response.js";
 import {
   autoApplyResponseLooksComplete,
@@ -14,7 +14,7 @@ import {
 } from "./lib/resume-pdf.js";
 import { loadJobContext, ACTIVE_CONTEXT_KEY, SHARED_CONTEXT_KEY } from "./lib/job-context.js";
 import { inferJobRole } from "./lib/tailor-history.js";
-import { loadSettings } from "./lib/settings.js";
+import { loadSettings, mergePromptInstructions } from "./lib/settings.js";
 import { callOpenAiChat } from "./lib/openai-api.js";
 import { getHybridAutoApplySteps } from "./lib/auto-apply-hybrid.js";
 import {
@@ -577,17 +577,23 @@ async function waitForAutoApplyResponse(tabId, assistantCountBefore) {
 }
 
 async function handleTailorResume(payload) {
-  const { resume, jobDescription, options, autoSend, jobWindowId } = payload;
+  const { jobDescription, options, autoSend, jobWindowId } = payload;
 
-  if (!resume?.trim()) {
-    throw new Error("Resume is empty. Add your resume in the extension popup.");
-  }
   if (!jobDescription?.trim()) {
     throw new Error("Job description is empty.");
   }
 
   const settings = await loadSettings();
-  const prompt = buildTailorPrompt({ resume, jobDescription, options });
+  const prompt = buildTailorPrompt({
+    jobDescription,
+    options: {
+      ...options,
+      extraInstructions: mergePromptInstructions(
+        settings.promptModifyTailor,
+        options?.extraInstructions
+      ),
+    },
+  });
 
   if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
     const responseText = await callOpenAiChat({
@@ -615,10 +621,14 @@ async function handleFillProfile(payload) {
     throw new Error("Paste resume source text or add existing profile content first.");
   }
 
+  const settings = await loadSettings();
   const prompt = buildFillProfilePrompt({
     sourceText: sourceText || "",
     existingResume: existingResume || "",
-    extraInstructions: extraInstructions || "",
+    extraInstructions: mergePromptInstructions(
+      settings.promptModifyFillProfile,
+      extraInstructions
+    ),
   });
 
   return runChatGPTPrompt(
@@ -642,6 +652,7 @@ async function handleRestructureJobDescription(payload) {
     jobDescription,
     position,
     companyName,
+    extraInstructions: settings.promptModifyRestructure,
   });
 
   if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
@@ -1030,7 +1041,7 @@ function isUsableTailorResponse(text) {
   if (!text?.trim() || !hasTailorResumeMarkers(text) || text.length <= 80) return false;
   try {
     const { structured } = parseTailorResponse(text);
-    return Boolean(serializeResume(structured).trim());
+    return hasTailoredContent(structured) || Boolean(serializeResume(structured).trim());
   } catch {
     return false;
   }

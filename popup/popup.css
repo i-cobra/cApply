@@ -1468,6 +1468,32 @@ footer,
   margin-top: 4px;
 }
 
+.settings-prompt-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.settings-prompt-section > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.settings-prompt-section textarea {
+  min-height: 72px;
+  resize: vertical;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .cover-letter-section textarea {
   min-height: 140px;
 }

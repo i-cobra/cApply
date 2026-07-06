@@ -1,7 +1,7 @@
 import { readResumeFile } from "../lib/pdf-extract.js";
 import { scoreTier } from "../lib/ats-score.js";
 import { buildAnalysisReport } from "../lib/analysis-report.js";
-import { emptyResume, parseResumeText, serializeResume } from "../lib/resume-structure.js";
+import { emptyResume, normalizeResume, parseResumeText, serializeResume } from "../lib/resume-structure.js";
 import {
   addTailorHistoryEntry,
   clearTailorHistory,
@@ -31,7 +31,7 @@ import {
   downloadResumePdf,
   encodeResumePdfBase64,
 } from "../lib/resume-pdf.js";
-import { parseTailorResponse, normalizeAtsScoreResult } from "../lib/tailor-response.js";
+import { parseTailorResponse, normalizeAtsScoreResult, hasTailoredContent } from "../lib/tailor-response.js";
 import {
   buildDisplayAtsScore,
   ensureTailoredResumeCoverage,
@@ -91,6 +91,7 @@ const els = {
   grabFromPage: document.getElementById("grabFromPage"),
   restructureJobBtn: document.getElementById("restructureJobBtn"),
   clearProfile: document.getElementById("clearProfile"),
+  downloadProfileResumeBtn: document.getElementById("downloadProfileResumeBtn"),
   profileFile: document.getElementById("profileFile"),
   saveProfile: document.getElementById("saveProfile"),
   profileStatus: document.getElementById("profileStatus"),
@@ -135,6 +136,9 @@ const els = {
   settingsUseOpenAiApi: document.getElementById("settingsUseOpenAiApi"),
   settingsOpenAiModel: document.getElementById("settingsOpenAiModel"),
   settingsOpenAiApiKey: document.getElementById("settingsOpenAiApiKey"),
+  settingsPromptModifyTailor: document.getElementById("settingsPromptModifyTailor"),
+  settingsPromptModifyFillProfile: document.getElementById("settingsPromptModifyFillProfile"),
+  settingsPromptModifyRestructure: document.getElementById("settingsPromptModifyRestructure"),
   onboardingOverlay: document.getElementById("onboardingOverlay"),
   onboardingStepLabel: document.getElementById("onboardingStepLabel"),
   onboardingTitle: document.getElementById("onboardingTitle"),
@@ -271,6 +275,7 @@ async function init() {
   els.grabFromPage.addEventListener("click", onGrabFromPage);
   els.restructureJobBtn.addEventListener("click", onRestructureJobDescription);
   els.clearProfile.addEventListener("click", onClearProfile);
+  els.downloadProfileResumeBtn.addEventListener("click", onDownloadProfileResume);
   els.profileFile.addEventListener("change", onProfileFile);
   els.saveProfile.addEventListener("click", onSaveProfile);
   els.fillProfileBtn.addEventListener("click", onFillProfile);
@@ -311,7 +316,14 @@ async function loadProfileResume() {
   ]);
 
   if (stored[PROFILE_STRUCTURED_KEY]) {
-    profileEditor.setStructured(stored[PROFILE_STRUCTURED_KEY]);
+    const structured = normalizeResume(stored[PROFILE_STRUCTURED_KEY]);
+    if (!structured.skills?.trim() && stored[PROFILE_KEY]) {
+      const reparsed = parseResumeText(stored[PROFILE_KEY]);
+      if (reparsed.skills?.trim()) {
+        structured.skills = reparsed.skills;
+      }
+    }
+    profileEditor.setStructured(structured);
     return;
   }
 
@@ -399,7 +411,7 @@ function applyApplicationState(state) {
   els.coverLetter.value = latestCoverLetter;
   updateCoverLetterVisibility();
 
-  if (state?.structured && hasResumeContent(state.structured)) {
+  if (state?.structured && hasResumeContent(normalizeResume(state.structured))) {
     showTailoredResume(state.structured, latestTailorChanges, latestAtsFromAi);
     updateAtsScore();
     return;
@@ -856,6 +868,15 @@ function applySettingsToForm(settings) {
   els.settingsUseOpenAiApi.checked = settings.useOpenAiApi;
   els.settingsOpenAiModel.value = settings.openAiModel;
   els.settingsOpenAiApiKey.value = settings.openAiApiKey;
+  if (els.settingsPromptModifyTailor) {
+    els.settingsPromptModifyTailor.value = settings.promptModifyTailor || "";
+  }
+  if (els.settingsPromptModifyFillProfile) {
+    els.settingsPromptModifyFillProfile.value = settings.promptModifyFillProfile || "";
+  }
+  if (els.settingsPromptModifyRestructure) {
+    els.settingsPromptModifyRestructure.value = settings.promptModifyRestructure || "";
+  }
 }
 
 async function onSaveSettings() {
@@ -867,6 +888,9 @@ async function onSaveSettings() {
     useOpenAiApi: els.settingsUseOpenAiApi.checked,
     openAiModel: els.settingsOpenAiModel.value.trim() || "gpt-4o-mini",
     openAiApiKey: els.settingsOpenAiApiKey.value.trim(),
+    promptModifyTailor: els.settingsPromptModifyTailor?.value.trim() || "",
+    promptModifyFillProfile: els.settingsPromptModifyFillProfile?.value.trim() || "",
+    promptModifyRestructure: els.settingsPromptModifyRestructure?.value.trim() || "",
   });
   applySettingsToForm(appSettings);
   els.settingsStatus.textContent = "Settings saved.";
@@ -1054,12 +1078,13 @@ function updateAtsScore() {
 }
 
 function showTailoredResume(structured, changes = [], atsScore) {
+  const normalized = normalizeResume(structured);
   latestTailorChanges = changes;
   if (atsScore !== undefined) {
     latestAtsFromAi = atsScore;
   }
-  tailoredResumeReady = hasResumeContent(structured);
-  tailoredEditor.setStructured(structured, { silent: true });
+  tailoredResumeReady = hasResumeContent(normalized);
+  tailoredEditor.setStructured(normalized, { silent: true });
   if (!tailorInProgress) {
     els.tailoredResumeSection.hidden = false;
   }
@@ -1505,6 +1530,22 @@ async function recordTailorHistory({
   await renderHistory();
 }
 
+function onDownloadProfileResume() {
+  const structured = profileEditor.getStructured();
+  const resumeText = getProfileResumeText().trim();
+
+  if (!resumeText) {
+    setProfileStatus("Nothing to download.", "error");
+    return;
+  }
+
+  const name = structured.contact.name?.trim() || "resume";
+  const filename = buildResumeDownloadFilename(name);
+
+  downloadResumePdf(structured, filename);
+  setProfileStatus("Resume downloaded.", "success");
+}
+
 async function onSaveProfile() {
   const text = getProfileResumeText();
   if (!text.trim()) {
@@ -1680,6 +1721,7 @@ function setProfileFillBusy(busy) {
   els.fillProfileBtn.classList.toggle("busy", busy);
   els.fillProfileBtn.setAttribute("aria-busy", String(busy));
   els.fillProfileBtn.textContent = busy ? "Importing…" : defaultLabel;
+  els.downloadProfileResumeBtn.disabled = busy;
 }
 
 function onFillProfile() {
@@ -1688,6 +1730,19 @@ function onFillProfile() {
 
 function hasResumeContent(structured) {
   return Boolean(serializeResume(structured).trim());
+}
+
+function mergeProfileFromSource(structured, sourceText) {
+  const normalized = normalizeResume(structured);
+  const trimmedSource = sourceText?.trim();
+  if (!trimmedSource) return normalized;
+
+  const local = parseResumeText(trimmedSource);
+  if (!normalized.skills?.trim() && local.skills?.trim()) {
+    normalized.skills = local.skills;
+  }
+
+  return normalized;
 }
 
 async function runFillProfile(sourceText = "") {
@@ -1728,13 +1783,13 @@ async function runFillProfile(sourceText = "") {
       throw new Error("ChatGPT returned an empty resume.");
     }
 
-    profileEditor.setStructured(structured);
+    profileEditor.setStructured(mergeProfileFromSource(structured, trimmedSource));
     await persistProfile();
     setProfileStatus("Profile fields filled from ChatGPT.", "success");
   } catch (err) {
     const localStructured = trimmedSource ? parseResumeText(trimmedSource) : null;
     if (localStructured && hasResumeContent(localStructured)) {
-      profileEditor.setStructured(localStructured);
+      profileEditor.setStructured(mergeProfileFromSource(localStructured, trimmedSource));
       await persistProfile();
       setProfileStatus(
         `Profile parsed locally. ChatGPT step failed: ${err.message}`,
@@ -1815,7 +1870,6 @@ async function onTailor() {
     const response = await sendBackgroundMessage({
       type: "TAILOR_RESUME",
       payload: {
-        resume,
         jobDescription,
         autoSend: els.autoSend.checked,
         jobWindowId: browserTab.windowId,
@@ -1838,10 +1892,12 @@ async function onTailor() {
     if (!response?.ok) throw new Error(response?.error || "Something went wrong");
 
     if (response.responseText?.trim()) {
+      const baseResume = profileEditor.getStructured();
       const { structured, changes, atsScore, coverLetter } = parseTailorResponse(
-        response.responseText
+        response.responseText,
+        { baseResume }
       );
-      if (!hasResumeContent(structured)) {
+      if (!hasTailoredContent(structured)) {
         throw new Error(
           "ChatGPT finished but no usable resume JSON was captured. Check the ChatGPT tab and try again."
         );

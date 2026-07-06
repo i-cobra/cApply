@@ -39,6 +39,7 @@
           Import from PDF
         </button>
         <div class="profile-actions-row">
+          <button type="button" id="downloadProfileResumeBtn" class="primary profile-action-btn">Download PDF</button>
           <button type="button" id="saveProfile" class="primary profile-action-btn">Save profile</button>
           <button type="button" id="clearProfile" class="primary danger profile-action-btn">Clear</button>
         </div>
@@ -315,7 +316,7 @@
     </section>
   </main>
 
-  <main id="panel-settings" class="tab-panel tab-panel-fill" role="tabpanel" aria-labelledby="tab-settings" hidden>
+  <main id="panel-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-settings" hidden>
     <section class="settings-panel">
       <div class="field-header">
         <label>Settings</label>
@@ -360,6 +361,26 @@
           <input type="password" id="settingsOpenAiApiKey" placeholder="sk-…" autocomplete="off" />
         </label>
       </div>
+
+      <section class="settings-prompt-section">
+        <div class="field-header">
+          <label>Prompt modify</label>
+        </div>
+        <p class="field-hint">Optional instructions appended to ChatGPT prompts. Applied on every run.</p>
+        <label class="full-width">
+          Tailor resume
+          <textarea id="settingsPromptModifyTailor" rows="3" placeholder="e.g. Keep to one page, emphasize leadership"></textarea>
+        </label>
+        <label class="full-width">
+          Import profile (PDF)
+          <textarea id="settingsPromptModifyFillProfile" rows="3" placeholder="e.g. Preserve original bullet wording where possible"></textarea>
+        </label>
+        <label class="full-width">
+          Restructure job description
+          <textarea id="settingsPromptModifyRestructure" rows="2" placeholder="e.g. Always include a Tech stack section"></textarea>
+        </label>
+      </section>
+
       <div class="settings-actions">
         <button type="button" id="saveSettingsBtn" class="primary profile-action-btn">Save settings</button>
       </div>

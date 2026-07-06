@@ -76,7 +76,7 @@ export function createResumeEditor(container, options = {}) {
         job.company?.trim() ||
         job.location?.trim() ||
         job.dates?.trim() ||
-        job.bullets?.some((b) => b.trim())
+        job.bullets?.some((b) => String(b ?? "").trim())
     );
   }
 
@@ -321,7 +321,7 @@ export function createResumeEditor(container, options = {}) {
           line.className = "bullet-row";
           const area = document.createElement("textarea");
           area.rows = 2;
-          area.value = job.bullets[i];
+          area.value = job.bullets[i] ?? "";
           area.placeholder = "Achievement or responsibility…";
           area.addEventListener("input", () => {
             job.bullets[i] = area.value;
