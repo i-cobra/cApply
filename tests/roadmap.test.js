@@ -181,6 +181,44 @@ test("ensureTailoredResumeCoverage does not prepend junk into categorized skills
   assert.match(result.skills, /Languages: JavaScript/);
 });
 
+test("cleanupTailoredResumeLogic handles summary commas after skills", () => {
+  const summary =
+    "Senior Software Engineer with 8+ years of experience developing high-performance software applications using C++, modern graphics programming techniques, and real-time simulation technologies.";
+
+  const result = cleanupTailoredResumeLogic(
+    {
+      contact: { name: "", email: "", phone: "", location: "", links: "" },
+      summary,
+      experience: [],
+      education: [],
+      skills: "Languages: C++, Python",
+      other: "",
+    },
+    "C++ Python JavaScript",
+    "Senior Software Engineer"
+  );
+
+  assert.match(result.summary, /Senior Software Engineer with 8\+ years/);
+  assert.doesNotMatch(result.summary, /specializing in modern graphics/i);
+});
+
+test("cleanupTailoredResumeLogic still fixes title comma splices", () => {
+  const result = cleanupTailoredResumeLogic(
+    {
+      contact: { name: "", email: "", phone: "", location: "", links: "" },
+      summary: "Senior Java Developer, microservices and cloud-native systems across production environments.",
+      experience: [],
+      education: [],
+      skills: "Languages: Java",
+      other: "",
+    },
+    "Java microservices",
+    "Senior Java Developer"
+  );
+
+  assert.match(result.summary, /Senior Java Developer specializing in microservices/i);
+});
+
 test("serializeResume tolerates null experience bullets", () => {
   const text = serializeResume({
     contact: { name: "Jane Doe", email: "", phone: "", location: "", links: "" },

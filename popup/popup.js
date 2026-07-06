@@ -1175,6 +1175,18 @@ function historyEntryPosition(entry) {
 }
 
 /**
+ * @param {string} url
+ */
+function formatJobUrlHost(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "");
+  } catch {
+    const trimmed = url.trim();
+    return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed;
+  }
+}
+
+/**
  * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
  * @param {string} companyQuery
  * @param {string} positionQuery
@@ -1343,15 +1355,31 @@ async function renderHistory() {
       title.textContent = position || company || "Tailored application";
     }
 
-    const preview = document.createElement("p");
+    const preview = document.createElement("div");
     preview.className = "history-preview";
     if (entry.jobUrl?.trim()) {
-      preview.textContent = entry.jobUrl.trim();
+      const jobUrl = entry.jobUrl.trim();
+      const link = document.createElement("a");
+      link.className = "history-job-link";
+      link.href = jobUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = jobUrl;
+      link.textContent = "View job posting";
+
+      const host = document.createElement("span");
+      host.className = "history-job-link-host";
+      host.textContent = formatJobUrlHost(jobUrl);
+      link.appendChild(host);
+      preview.appendChild(link);
     } else {
-      preview.textContent = entry.jobDescription
+      const snippet = document.createElement("p");
+      snippet.className = "history-preview-text";
+      snippet.textContent = entry.jobDescription
         .trim()
         .replace(/\s+/g, " ")
         .slice(0, 140);
+      preview.appendChild(snippet);
     }
 
     const actions = document.createElement("div");
@@ -1367,7 +1395,8 @@ async function renderHistory() {
     openBtn.type = "button";
     openBtn.className = "link-btn";
     openBtn.dataset.action = "open";
-    openBtn.textContent = "Open in Application";
+    openBtn.textContent = "Open";
+    openBtn.title = "Open in Application";
 
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";

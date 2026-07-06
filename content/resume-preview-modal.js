@@ -62,7 +62,7 @@
           margin: 0;
           flex: 1;
           min-width: 0;
-          font-size: 15px;
+          font-size: 17px;
           font-weight: 700;
           color: #eef1f6;
           overflow: hidden;
@@ -89,7 +89,7 @@
           border-radius: 9px;
           border: 1px solid transparent;
           font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-          font-size: 13px;
+          font-size: 15px;
           font-weight: 600;
           line-height: 1;
           letter-spacing: 0;
@@ -164,7 +164,7 @@
           padding: 32px 24px;
           color: #ffb4b4;
           text-align: center;
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.5;
         }
 
@@ -176,7 +176,7 @@
           justify-content: center;
           background: rgba(82, 86, 89, 0.92);
           color: #eef1f6;
-          font-size: 14px;
+          font-size: 16px;
           font-weight: 600;
         }
       `;
