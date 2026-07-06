@@ -22,10 +22,15 @@ import {
   CHATGPT_MODEL_INSTANT,
   getChatGptModelConfig,
 } from "./lib/chatgpt-models.js";
+import {
+  getLlmProvider,
+  isAnyLlmUrl,
+  isProviderUrl,
+  LLM_PROVIDERS,
+} from "./lib/llm-provider.js";
 import "./lib/jspdf/jspdf.umd.min.js";
 
-const CHATGPT_URL = "https://chatgpt.com/";
-const CHATGPT_HOSTS = ["chatgpt.com", "chat.openai.com"];
+const CHATGPT_PROVIDER = LLM_PROVIDERS.chatgpt;
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
@@ -79,7 +84,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "OPEN_CHATGPT_LOGIN") {
-    openChatGPTLogin()
+    openLlmLogin()
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -188,7 +193,7 @@ async function handleGrabPageText() {
     throw new Error("Open a job posting page in the browser, then click Grab from page.");
   }
 
-  if (CHATGPT_HOSTS.some((h) => url.includes(h))) {
+  if (isAnyLlmUrl(url)) {
     throw new Error("Switch to the job posting tab first, then click Grab from page.");
   }
 
@@ -256,7 +261,7 @@ async function handleAutoApplyJob(payload) {
     throw new Error("Open the job posting page in the browser, then click Auto Apply.");
   }
 
-  if (CHATGPT_HOSTS.some((h) => pageUrl.includes(h))) {
+  if (isAnyLlmUrl(pageUrl)) {
     throw new Error("Switch to the job posting tab first, then click Auto Apply.");
   }
 
@@ -445,16 +450,16 @@ async function ensureJobPageAutomation(tabId) {
 }
 
 async function runAutoApplyChatGPTPrompt(prompt, jobWindowId) {
-  const tab = await findOrOpenChatGPTTab(jobWindowId);
+  const tab = await findOrOpenLlmTab(CHATGPT_PROVIDER, jobWindowId);
 
   await ensureTabAwake(tab.id);
   await waitForTabLoad(tab.id);
-  await ensureChatGPTReady(tab.id);
-  await prepareBackgroundChatGPTTab(tab.id);
-  await ensurePageApi(tab.id);
-  await waitForChatGPTReady(tab.id);
+  await ensureLlmReady(tab.id, CHATGPT_PROVIDER);
+  await prepareBackgroundLlmTab(tab.id);
+  await ensurePageApi(tab.id, CHATGPT_PROVIDER);
+  await waitForLlmReady(tab.id, CHATGPT_PROVIDER);
 
-  return runAutoApplyPromptWithPolling(tab.id, prompt);
+  return runAutoApplyPromptWithPolling(tab.id, prompt, CHATGPT_PROVIDER);
 }
 
 function pickAutoApplyCaptureText(capture) {
@@ -476,7 +481,7 @@ function pickAutoApplyCaptureText(capture) {
   return dom.length > stream.length ? dom : stream;
 }
 
-async function runAutoApplyPromptWithPolling(tabId, prompt) {
+async function runAutoApplyPromptWithPolling(tabId, prompt, provider = CHATGPT_PROVIDER) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 
   const stopKeepalive = startBackgroundKeepalive();
@@ -488,9 +493,9 @@ async function runAutoApplyPromptWithPolling(tabId, prompt) {
       func: () => window.__cApplyStartKeepalive?.(),
     });
 
-    const sendResult = await injectAndSend(tabId, prompt, CHATGPT_MODEL_HIGH);
+    const sendResult = await injectAndSend(tabId, prompt, CHATGPT_MODEL_HIGH, provider);
     if (!sendResult?.ok || !sendResult.sent) {
-      throw new Error(sendResult?.error || "Could not send auto-apply prompt to ChatGPT.");
+      throw new Error(sendResult?.error || provider.sendError);
     }
 
     const assistantCountBefore = sendResult.assistantCountBefore ?? 0;
@@ -605,12 +610,14 @@ async function handleTailorResume(payload) {
     return { ok: true, sent: true, responseText, source: "openai-api" };
   }
 
-  return runChatGPTPrompt(
+  const provider = getLlmProvider(settings);
+  return runLlmPrompt(
     prompt,
     autoSend ?? settings.autoSend,
     jobWindowId,
-    TAILOR_RESPONSE_PROFILE,
-    CHATGPT_MODEL_HIGH
+    buildTailorResponseProfile(provider),
+    CHATGPT_MODEL_HIGH,
+    provider
   );
 }
 
@@ -622,6 +629,7 @@ async function handleFillProfile(payload) {
   }
 
   const settings = await loadSettings();
+  const provider = getLlmProvider(settings);
   const prompt = buildFillProfilePrompt({
     sourceText: sourceText || "",
     existingResume: existingResume || "",
@@ -631,12 +639,13 @@ async function handleFillProfile(payload) {
     ),
   });
 
-  return runChatGPTPrompt(
+  return runLlmPrompt(
     prompt,
     autoSend,
     undefined,
-    TAILOR_RESPONSE_PROFILE,
-    CHATGPT_MODEL_INSTANT
+    buildTailorResponseProfile(provider),
+    CHATGPT_MODEL_INSTANT,
+    provider
   );
 }
 
@@ -665,12 +674,14 @@ async function handleRestructureJobDescription(payload) {
     return { ok: true, sent: true, responseText, source: "openai-api" };
   }
 
-  return runChatGPTPrompt(
+  const provider = getLlmProvider(settings);
+  return runLlmPrompt(
     prompt,
     autoSend ?? settings.autoSend,
     jobWindowId,
-    RESTRUCTURE_RESPONSE_PROFILE,
-    CHATGPT_MODEL_INSTANT
+    buildRestructureResponseProfile(provider),
+    CHATGPT_MODEL_INSTANT,
+    provider
   );
 }
 
@@ -682,36 +693,38 @@ async function getJobTabContext() {
   };
 }
 
-async function runChatGPTPrompt(
+async function runLlmPrompt(
   prompt,
   autoSend,
   explicitJobWindowId,
-  profile = TAILOR_RESPONSE_PROFILE,
-  modelTier = CHATGPT_MODEL_HIGH
+  profile,
+  modelTier = CHATGPT_MODEL_HIGH,
+  provider = CHATGPT_PROVIDER
 ) {
   const jobWindowId =
     explicitJobWindowId ?? (await getJobTabContext()).jobWindowId;
-  const tab = await findOrOpenChatGPTTab(jobWindowId);
+  const tab = await findOrOpenLlmTab(provider, jobWindowId);
 
   await ensureTabAwake(tab.id);
   await waitForTabLoad(tab.id);
-  await ensureChatGPTReady(tab.id);
-  await prepareBackgroundChatGPTTab(tab.id);
-  await ensurePageApi(tab.id);
-  await waitForChatGPTReady(tab.id);
+  await ensureLlmReady(tab.id, provider);
+  await prepareBackgroundLlmTab(tab.id);
+  await ensurePageApi(tab.id, provider);
+  await waitForLlmReady(tab.id, provider);
 
   if (!autoSend) {
-    await runInjectOnly(tab.id, prompt, modelTier);
-    return { ok: true, tabId: tab.id, sent: false, responseText: "" };
+    await runInjectOnly(tab.id, prompt, modelTier, provider);
+    return { ok: true, tabId: tab.id, sent: false, responseText: "", provider: provider.id };
   }
 
-  const responseText = await runPromptWithPolling(tab.id, prompt, profile, modelTier);
+  const responseText = await runPromptWithPolling(tab.id, prompt, profile, modelTier, provider);
 
   return {
     ok: true,
     tabId: tab.id,
     sent: true,
     responseText,
+    provider: provider.id,
   };
 }
 
@@ -834,7 +847,11 @@ function pickRestructureCaptureText(capture) {
   return dom.length > stream.length ? dom : stream;
 }
 
-async function prepareChatGptModel(tabId, modelTier) {
+async function prepareChatGptModel(tabId, modelTier, provider = CHATGPT_PROVIDER) {
+  if (!provider.supportsModelSelection) {
+    return { ok: true, skipped: true };
+  }
+
   const config = getChatGptModelConfig(modelTier);
 
   await chrome.scripting.executeScript({
@@ -856,8 +873,8 @@ async function prepareChatGptModel(tabId, modelTier) {
   return result || { ok: true };
 }
 
-async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
-  await prepareChatGptModel(tabId, modelTier);
+async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, provider = CHATGPT_PROVIDER) {
+  await prepareChatGptModel(tabId, modelTier, provider);
 
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -875,7 +892,7 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
 
     if (!fillResult?.ok) {
       if (attempt === 1) {
-        return fillResult || { ok: false, error: "Could not fill ChatGPT composer." };
+        return fillResult || { ok: false, error: provider.composerFillError };
       }
       await sleep(1000);
       continue;
@@ -886,7 +903,7 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
     const ready = await waitForComposerReady(tabId, 4000);
     if (!ready.ready) {
       if (attempt === 1) {
-        return { ok: false, error: ready.error || "ChatGPT composer did not accept the prompt." };
+        return { ok: false, error: ready.error || provider.composerReadyError };
       }
       continue;
     }
@@ -902,11 +919,11 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
     }
 
     if (attempt === 1) {
-      return sendResult || { ok: false, error: "Could not send prompt to ChatGPT." };
+      return sendResult || { ok: false, error: provider.sendError };
     }
   }
 
-  return { ok: false, error: "Could not send prompt to ChatGPT." };
+  return { ok: false, error: provider.sendError };
 }
 
 async function waitForComposerReady(tabId, maxMs = 4000) {
@@ -972,8 +989,9 @@ async function pollCapture(tabId, assistantCountBefore = 0) {
 async function runPromptWithPolling(
   tabId,
   prompt,
-  profile = TAILOR_RESPONSE_PROFILE,
-  modelTier = CHATGPT_MODEL_HIGH
+  profile,
+  modelTier = CHATGPT_MODEL_HIGH,
+  provider = CHATGPT_PROVIDER
 ) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 
@@ -986,9 +1004,9 @@ async function runPromptWithPolling(
       func: () => window.__cApplyStartKeepalive?.(),
     });
 
-    const sendResult = await injectAndSend(tabId, prompt, modelTier);
+    const sendResult = await injectAndSend(tabId, prompt, modelTier, provider);
     if (!sendResult?.ok || !sendResult.sent) {
-      throw new Error(sendResult?.error || "Could not send prompt to ChatGPT.");
+      throw new Error(sendResult?.error || provider.sendError);
     }
 
     const assistantCountBefore = sendResult.assistantCountBefore ?? 0;
@@ -1084,29 +1102,39 @@ function restructureStableRoundsNeeded(text) {
  *   isUsable: (text: string) => boolean,
  *   looksComplete: (text: string) => boolean,
  *   stableRoundsNeeded: (text: string) => number
- * }} ChatGptResponseProfile */
+ * }} LlmResponseProfile */
 
-/** @type {ChatGptResponseProfile} */
-const TAILOR_RESPONSE_PROFILE = {
-  minLength: 80,
-  emptyError: "ChatGPT did not return resume JSON.",
-  hasMarkers: hasTailorResumeMarkers,
-  pickCaptureText: pickTailorCaptureText,
-  isUsable: isUsableTailorResponse,
-  looksComplete: responseLooksComplete,
-  stableRoundsNeeded,
-};
+/**
+ * @param {import("./lib/llm-provider.js").LlmProviderConfig} provider
+ * @returns {LlmResponseProfile}
+ */
+function buildTailorResponseProfile(provider) {
+  return {
+    minLength: 80,
+    emptyError: provider.emptyResponseError,
+    hasMarkers: hasTailorResumeMarkers,
+    pickCaptureText: pickTailorCaptureText,
+    isUsable: isUsableTailorResponse,
+    looksComplete: responseLooksComplete,
+    stableRoundsNeeded,
+  };
+}
 
-/** @type {ChatGptResponseProfile} */
-const RESTRUCTURE_RESPONSE_PROFILE = {
-  minLength: 50,
-  emptyError: "ChatGPT did not return restructured job description JSON.",
-  hasMarkers: hasRestructureJobMarkers,
-  pickCaptureText: pickRestructureCaptureText,
-  isUsable: isUsableRestructureResponse,
-  looksComplete: restructureLooksComplete,
-  stableRoundsNeeded: restructureStableRoundsNeeded,
-};
+/**
+ * @param {import("./lib/llm-provider.js").LlmProviderConfig} provider
+ * @returns {LlmResponseProfile}
+ */
+function buildRestructureResponseProfile(provider) {
+  return {
+    minLength: 50,
+    emptyError: `${provider.label} did not return restructured job description JSON.`,
+    hasMarkers: hasRestructureJobMarkers,
+    pickCaptureText: pickRestructureCaptureText,
+    isUsable: isUsableRestructureResponse,
+    looksComplete: restructureLooksComplete,
+    stableRoundsNeeded: restructureStableRoundsNeeded,
+  };
+}
 
 function startBackgroundKeepalive() {
   const timer = setInterval(() => {
@@ -1118,7 +1146,7 @@ function startBackgroundKeepalive() {
 async function waitForCapturedResponse(
   tabId,
   assistantCountBefore,
-  profile = TAILOR_RESPONSE_PROFILE
+  profile
 ) {
   const deadline = Date.now() + 310000;
   let lastText = "";
@@ -1170,7 +1198,7 @@ async function waitForCapturedResponse(
   return profile.isUsable(final) ? final : "";
 }
 
-async function ensurePageApi(tabId) {
+async function ensurePageApi(tabId, provider = CHATGPT_PROVIDER) {
   const [{ result: ready }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
@@ -1185,12 +1213,13 @@ async function ensurePageApi(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: () => {
-      window.__cApplyChatGPTInjectLoaded = false;
+    func: (flag) => {
+      window[flag] = false;
     },
+    args: [provider.injectLoadedFlag],
   });
 
-  await loadChatGPTPageApi(tabId);
+  await loadLlmPageApi(tabId, provider);
   await sleep(800);
 
   const [{ result: readyAfter }] = await chrome.scripting.executeScript({
@@ -1203,11 +1232,11 @@ async function ensurePageApi(tabId) {
   });
 
   if (!readyAfter) {
-    throw new Error("Could not initialize ChatGPT automation on the page.");
+    throw new Error(provider.initError);
   }
 }
 
-async function waitForChatGPTReady(tabId, maxMs = 120000) {
+async function waitForLlmReady(tabId, provider = CHATGPT_PROVIDER, maxMs = 120000) {
   const deadline = Date.now() + maxMs;
   let reloaded = false;
 
@@ -1215,19 +1244,25 @@ async function waitForChatGPTReady(tabId, maxMs = 120000) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      func: async () => {
+      func: async (providerId) => {
         if (typeof window.__cApplyHasComposer === "function" && window.__cApplyHasComposer()) {
           return { ready: true };
         }
-        try {
-          const session = await fetch("/api/auth/session", {
-            credentials: "include",
-          }).then((res) => res.json());
-          return { ready: Boolean(session?.accessToken) };
-        } catch {
-          return { ready: false };
+
+        if (providerId === "chatgpt") {
+          try {
+            const session = await fetch("/api/auth/session", {
+              credentials: "include",
+            }).then((res) => res.json());
+            return { ready: Boolean(session?.accessToken) };
+          } catch {
+            return { ready: false };
+          }
         }
+
+        return { ready: false };
       },
+      args: [provider.id],
     });
 
     if (result?.ready) return;
@@ -1237,39 +1272,37 @@ async function waitForChatGPTReady(tabId, maxMs = 120000) {
       await chrome.tabs.reload(tabId).catch(() => {});
       await waitForTabLoad(tabId);
       await sleep(4000);
-      await prepareBackgroundChatGPTTab(tabId);
-      await loadChatGPTPageApi(tabId);
+      await prepareBackgroundLlmTab(tabId);
+      await loadLlmPageApi(tabId, provider);
     }
 
     await sleep(1000);
   }
 
-  throw new Error(
-    "ChatGPT is not ready. Sign in at chatgpt.com in this browser, then try Tailor again."
-  );
+  throw new Error(provider.notReadyError);
 }
 
-async function runInjectOnly(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH) {
-  await prepareChatGptModel(tabId, modelTier);
+async function runInjectOnly(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, provider = CHATGPT_PROVIDER) {
+  await prepareChatGptModel(tabId, modelTier, provider);
 
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: (text) => {
+    func: (text, missingError) => {
       if (typeof window.__cApplyRunInjectSync !== "function") {
-        return { ok: false, error: "ChatGPT inject API missing." };
+        return { ok: false, error: missingError };
       }
       return window.__cApplyRunInjectSync(text, false);
     },
-    args: [prompt],
+    args: [prompt, provider.injectMissingError],
   });
 
   if (!result?.ok) {
-    throw new Error(result?.error || "Could not insert prompt into ChatGPT.");
+    throw new Error(result?.error || provider.composerFillError);
   }
 }
 
-async function prepareBackgroundChatGPTTab(tabId) {
+async function prepareBackgroundLlmTab(tabId) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
   await chrome.scripting.executeScript({
     target: { tabId },
@@ -1291,51 +1324,40 @@ async function prepareBackgroundChatGPTTab(tabId) {
   });
 }
 
-function isChatGPTUrl(url) {
-  return Boolean(url && CHATGPT_HOSTS.some((h) => url.includes(h)));
-}
-
-async function findOrOpenChatGPTTab(jobWindowId) {
+async function findOrOpenLlmTab(provider, jobWindowId) {
   const allTabs = await chrome.tabs.query({});
-  const existingAnywhere = allTabs.find((t) => isChatGPTUrl(t.url));
+  const existingAnywhere = allTabs.find((t) => isProviderUrl(t.url, provider));
   if (existingAnywhere?.id) return existingAnywhere;
 
   if (jobWindowId) {
     const inJobWindow = await chrome.tabs.query({ windowId: jobWindowId });
-    const existing = inJobWindow.find((t) => isChatGPTUrl(t.url));
+    const existing = inJobWindow.find((t) => isProviderUrl(t.url, provider));
     if (existing?.id) return existing;
 
     return chrome.tabs.create({
       windowId: jobWindowId,
-      url: CHATGPT_URL,
+      url: provider.url,
       active: false,
     });
   }
 
-  return chrome.tabs.create({ url: CHATGPT_URL, active: false });
+  return chrome.tabs.create({ url: provider.url, active: false });
 }
 
-async function openChatGPTLogin() {
+async function openLlmLogin() {
+  const settings = await loadSettings();
+  const provider = getLlmProvider(settings);
   const { jobWindowId } = await getJobTabContext();
-  const tab = await findOrOpenChatGPTTab(jobWindowId);
-  await chrome.tabs.update(tab.id, { active: true, url: CHATGPT_URL });
+  const tab = await findOrOpenLlmTab(provider, jobWindowId);
+  await chrome.tabs.update(tab.id, { active: true, url: provider.url });
 }
 
-async function ensureTabAwake(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  if (!tab.discarded) return;
-
-  await chrome.tabs.reload(tabId);
-  await waitForTabLoad(tabId);
-  await sleep(2500);
-}
-
-async function ensureChatGPTReady(tabId) {
+async function ensureLlmReady(tabId, provider = CHATGPT_PROVIDER) {
   const tab = await chrome.tabs.get(tabId);
   const url = tab.url || "";
 
-  if (!CHATGPT_HOSTS.some((h) => url.includes(h))) {
-    await chrome.tabs.update(tabId, { url: CHATGPT_URL });
+  if (!isProviderUrl(url, provider)) {
+    await chrome.tabs.update(tabId, { url: provider.url });
     await waitForTabLoad(tabId);
     await sleep(3000);
     return;
@@ -1346,7 +1368,7 @@ async function ensureChatGPTReady(tabId) {
     url.includes("/login") ||
     url.includes("/api/auth")
   ) {
-    await chrome.tabs.update(tabId, { url: CHATGPT_URL });
+    await chrome.tabs.update(tabId, { url: provider.url });
     await waitForTabLoad(tabId);
     await sleep(3000);
   }
@@ -1366,12 +1388,21 @@ function waitForTabLoad(tabId) {
   });
 }
 
-async function loadChatGPTPageApi(tabId) {
+async function loadLlmPageApi(tabId, provider = CHATGPT_PROVIDER) {
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    files: ["content/chatgpt-inject-page.js"],
+    files: [provider.injectScript],
   });
+}
+
+async function ensureTabAwake(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.discarded) return;
+
+  await chrome.tabs.reload(tabId);
+  await waitForTabLoad(tabId);
+  await sleep(2500);
 }
 
 function sleep(ms) {

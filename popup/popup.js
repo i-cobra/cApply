@@ -24,6 +24,7 @@ import {
   saveJobContext,
 } from "../lib/job-context.js";
 import { loadSettings, saveSettings } from "../lib/settings.js";
+import { getLlmProviderLabel, getLlmProviderIconSvg } from "../lib/llm-provider.js";
 import { shouldShowOnboarding, completeOnboarding, ONBOARDING_STEPS } from "../lib/onboarding.js";
 import { parseRestructureJobResponse } from "../lib/restructure-job-response.js";
 import {
@@ -81,6 +82,7 @@ const els = {
   autoSend: document.getElementById("autoSend"),
   extraInstructions: document.getElementById("extraInstructions"),
   tailorBtn: document.getElementById("tailorBtn"),
+  tailorBtnIcon: document.getElementById("tailorBtnIcon"),
   tailorBtnLabel: document.querySelector("#tailorBtn .tailor-btn-label"),
   applicationActionsSecondary: document.getElementById("applicationActionsSecondary"),
   downloadResumeBtn: document.getElementById("downloadResumeBtn"),
@@ -131,6 +133,7 @@ const els = {
   settingsStatus: document.getElementById("settingsStatus"),
   settingsDefaultTone: document.getElementById("settingsDefaultTone"),
   settingsDefaultOutput: document.getElementById("settingsDefaultOutput"),
+  settingsLlmProvider: document.getElementById("settingsLlmProvider"),
   settingsAutoSend: document.getElementById("settingsAutoSend"),
   settingsHybridAutoApply: document.getElementById("settingsHybridAutoApply"),
   settingsUseOpenAiApi: document.getElementById("settingsUseOpenAiApi"),
@@ -139,6 +142,10 @@ const els = {
   settingsPromptModifyTailor: document.getElementById("settingsPromptModifyTailor"),
   settingsPromptModifyFillProfile: document.getElementById("settingsPromptModifyFillProfile"),
   settingsPromptModifyRestructure: document.getElementById("settingsPromptModifyRestructure"),
+  appSubtitle: document.getElementById("appSubtitle"),
+  autoSendLabel: document.getElementById("autoSendLabel"),
+  settingsAutoSendLabel: document.getElementById("settingsAutoSendLabel"),
+  settingsPromptHint: document.getElementById("settingsPromptHint"),
   onboardingOverlay: document.getElementById("onboardingOverlay"),
   onboardingStepLabel: document.getElementById("onboardingStepLabel"),
   onboardingTitle: document.getElementById("onboardingTitle"),
@@ -216,18 +223,42 @@ let tailorSession = null;
 const TAILOR_TIMEOUT_MS = 320_000;
 const AUTO_APPLY_TIMEOUT_MS = 900_000;
 
+function getActiveLlmLabel() {
+  return getLlmProviderLabel(appSettings);
+}
+
+function updateProviderUi() {
+  const label = getActiveLlmLabel();
+  if (els.appSubtitle) {
+    els.appSubtitle.textContent = `Tailor your resume with ${label}`;
+  }
+  if (els.autoSendLabel) {
+    els.autoSendLabel.textContent = `Auto-send to ${label}`;
+  }
+  if (els.settingsAutoSendLabel) {
+    els.settingsAutoSendLabel.textContent = `Auto-send to ${label} by default`;
+  }
+  if (els.atsResumeSource && !tailorInProgress) {
+    els.atsResumeSource.textContent = label;
+  }
+  if (els.tailorBtnIcon) {
+    els.tailorBtnIcon.innerHTML = getLlmProviderIconSvg(appSettings);
+  }
+}
+
 /**
  * @param {unknown} message
  * @param {number} [timeoutMs]
  */
 function sendBackgroundMessage(message, timeoutMs = TAILOR_TIMEOUT_MS) {
+  const label = getActiveLlmLabel();
   return Promise.race([
     chrome.runtime.sendMessage(message),
     new Promise((_, reject) => {
       setTimeout(() => {
         reject(
           new Error(
-            "Tailoring timed out. Check the ChatGPT tab — if the JSON response is ready, click Re-tailor."
+            `Tailoring timed out. Check the ${label} tab — if the JSON response is ready, click Re-tailor.`
           )
         );
       }, timeoutMs);
@@ -241,6 +272,7 @@ async function init() {
   await loadProfileResume();
   appSettings = await loadSettings();
   applySettingsToForm(appSettings);
+  updateProviderUi();
 
   const tab = await getActiveBrowserTab();
   if (tab) {
@@ -863,6 +895,9 @@ function applySettingsToForm(settings) {
   els.autoSend.checked = settings.autoSend;
   els.settingsDefaultTone.value = settings.defaultTone;
   els.settingsDefaultOutput.value = settings.defaultOutputFormat;
+  if (els.settingsLlmProvider) {
+    els.settingsLlmProvider.value = settings.llmProvider || "chatgpt";
+  }
   els.settingsAutoSend.checked = settings.autoSend;
   els.settingsHybridAutoApply.checked = settings.hybridAutoApply;
   els.settingsUseOpenAiApi.checked = settings.useOpenAiApi;
@@ -883,6 +918,7 @@ async function onSaveSettings() {
   appSettings = await saveSettings({
     defaultTone: els.settingsDefaultTone.value,
     defaultOutputFormat: els.settingsDefaultOutput.value,
+    llmProvider: els.settingsLlmProvider?.value || "chatgpt",
     autoSend: els.settingsAutoSend.checked,
     hybridAutoApply: els.settingsHybridAutoApply.checked,
     useOpenAiApi: els.settingsUseOpenAiApi.checked,
@@ -893,6 +929,7 @@ async function onSaveSettings() {
     promptModifyRestructure: els.settingsPromptModifyRestructure?.value.trim() || "",
   });
   applySettingsToForm(appSettings);
+  updateProviderUi();
   els.settingsStatus.textContent = "Settings saved.";
   els.settingsStatus.className = "status success";
 }
@@ -1053,7 +1090,7 @@ function updateAtsScore() {
 
   if (!atsScore || atsScore.score == null) {
     els.atsScoreSection.hidden = tailorInProgress;
-    els.atsResumeSource.textContent = "ChatGPT";
+    els.atsResumeSource.textContent = getActiveLlmLabel();
     els.atsScoreValue.textContent = "—";
     els.atsScoreRing.className = "ats-score-ring";
     els.atsScoreRing.setAttribute("aria-label", "ATS match score unavailable");
@@ -1063,8 +1100,9 @@ function updateAtsScore() {
   }
 
   const tier = scoreTier(atsScore.score);
+  const llmLabel = getActiveLlmLabel();
 
-  els.atsResumeSource.textContent = "ChatGPT";
+  els.atsResumeSource.textContent = llmLabel;
   els.atsScoreValue.textContent = String(atsScore.score);
   els.atsScoreRing.className = `ats-score-ring tier-${tier}`;
   els.atsScoreRing.setAttribute(
@@ -1073,7 +1111,7 @@ function updateAtsScore() {
   );
   els.atsScoreSummary.textContent =
     atsScore.summary ||
-    `ChatGPT estimates ${atsScore.score}% ATS match for this tailored resume.`;
+    `${llmLabel} estimates ${atsScore.score}% ATS match for this tailored resume.`;
   els.atsScoreSection.hidden = tailorInProgress;
 }
 
@@ -1674,9 +1712,10 @@ async function onRestructureJobDescription() {
   }
 
   const browserTab = await getActiveBrowserTab();
+  const llmLabel = getActiveLlmLabel();
   restructureInProgress = true;
   updateJobDescriptionActions();
-  setStatus("Restructuring job description with ChatGPT…");
+  setStatus(`Restructuring job description with ${llmLabel}…`);
 
   try {
     const response = await sendBackgroundMessage(
@@ -1706,11 +1745,11 @@ async function onRestructureJobDescription() {
     if (!response.responseText?.trim()) {
       if (els.autoSend.checked) {
         throw new Error(
-          "ChatGPT finished but no restructured text was captured. Check the ChatGPT tab and try again."
+          `${llmLabel} finished but no restructured text was captured. Check the ${llmLabel} tab and try again.`
         );
       }
       setStatus(
-        "Prompt ready in ChatGPT. Send it, then click Restructure job description again.",
+        `Prompt ready in ${llmLabel}. Send it, then click Restructure job description again.`,
         "success"
       );
       return;
@@ -1718,7 +1757,7 @@ async function onRestructureJobDescription() {
 
     const restructured = parseRestructureJobResponse(response.responseText);
     if (!restructured.jobDescription.trim()) {
-      throw new Error("ChatGPT returned an empty job description.");
+      throw new Error(`${llmLabel} returned an empty job description.`);
     }
 
     els.jobDescription.value = restructured.jobDescription;
@@ -1786,7 +1825,8 @@ async function runFillProfile(sourceText = "") {
   }
 
   setProfileFillBusy(true);
-  setProfileStatus("Sending to ChatGPT — waiting for JSON response…");
+  const llmLabel = getActiveLlmLabel();
+  setProfileStatus(`Sending to ${llmLabel} — waiting for JSON response…`);
 
   try {
     const response = await chrome.runtime.sendMessage({
@@ -1803,25 +1843,25 @@ async function runFillProfile(sourceText = "") {
 
     if (!response.responseText?.trim()) {
       throw new Error(
-        "ChatGPT finished but no JSON response was captured. Check the ChatGPT tab."
+        `${llmLabel} finished but no JSON response was captured. Check the ${llmLabel} tab.`
       );
     }
 
     const { structured } = parseTailorResponse(response.responseText);
     if (!hasResumeContent(structured)) {
-      throw new Error("ChatGPT returned an empty resume.");
+      throw new Error(`${llmLabel} returned an empty resume.`);
     }
 
     profileEditor.setStructured(mergeProfileFromSource(structured, trimmedSource));
     await persistProfile();
-    setProfileStatus("Profile fields filled from ChatGPT.", "success");
+    setProfileStatus(`Profile fields filled from ${llmLabel}.`, "success");
   } catch (err) {
     const localStructured = trimmedSource ? parseResumeText(trimmedSource) : null;
     if (localStructured && hasResumeContent(localStructured)) {
       profileEditor.setStructured(mergeProfileFromSource(localStructured, trimmedSource));
       await persistProfile();
       setProfileStatus(
-        `Profile parsed locally. ChatGPT step failed: ${err.message}`,
+        `Profile parsed locally. ${llmLabel} step failed: ${err.message}`,
         "success"
       );
     } else {
@@ -1888,9 +1928,10 @@ async function onTailor() {
   };
   tailorInProgress = true;
 
+  const llmLabel = getActiveLlmLabel();
   setTailorBusy(true);
   if (!els.autoSend.checked) {
-    setStatus("Opening ChatGPT and inserting prompt…");
+    setStatus(`Opening ${llmLabel} and inserting prompt…`);
   } else {
     setStatus("");
   }
@@ -1928,7 +1969,7 @@ async function onTailor() {
       );
       if (!hasTailoredContent(structured)) {
         throw new Error(
-          "ChatGPT finished but no usable resume JSON was captured. Check the ChatGPT tab and try again."
+          `${llmLabel} finished but no usable resume JSON was captured. Check the ${llmLabel} tab and try again.`
         );
       }
       const enriched = ensureTailoredResumeCoverage(
@@ -1969,12 +2010,12 @@ async function onTailor() {
       setStatus("");
     } else if (els.autoSend.checked) {
       setStatus(
-        "ChatGPT finished but no JSON response was captured. Check the ChatGPT tab.",
+        `${llmLabel} finished but no JSON response was captured. Check the ${llmLabel} tab.`,
         "error"
       );
     } else {
       setStatus(
-        "Prompt ready in ChatGPT. Send it, then tailor again to capture the JSON response.",
+        `Prompt ready in ${llmLabel}. Send it, then tailor again to capture the JSON response.`,
         "success"
       );
     }

@@ -1,6 +1,6 @@
 {
   "name": "capply",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "A Chrome extension that builds a tailored-resume prompt from your resume + a job description, then injects it into the [ChatGPT](https://chatgpt.com) web app so you can refine and export the result.",
   "type": "module",
   "main": "background.js",

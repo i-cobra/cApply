@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "cApply — Resume Tailor for ChatGPT",
-  "version": "1.4.0",
-  "description": "Tailor your resume to any job description using ChatGPT web app.",
+  "name": "cApply — Resume Tailor",
+  "version": "1.5.0",
+  "description": "Tailor your resume to any job description using ChatGPT or Claude web apps.",
   "permissions": ["storage", "activeTab", "scripting", "tabs", "sidePanel"],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
   "host_permissions": [
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://claude.ai/*"
   ],
   "side_panel": {
     "default_path": "popup/popup.html"
@@ -29,12 +30,21 @@
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
       "js": ["content/chatgpt-bridge.js"],
       "run_at": "document_start"
+    },
+    {
+      "matches": ["https://claude.ai/*"],
+      "js": ["content/claude-bridge.js"],
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": ["content/page-inject.js", "content/chatgpt-inject-page.js"],
       "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"]
+    },
+    {
+      "resources": ["content/claude-inject-page.js"],
+      "matches": ["https://claude.ai/*"]
     },
     {
       "resources": ["lib/pdfjs/pdf.worker.min.mjs"],
