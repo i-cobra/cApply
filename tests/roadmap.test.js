@@ -3,12 +3,18 @@ import assert from "node:assert/strict";
 import { parseJsonFromText } from "../lib/json-extract.js";
 import { buildAnalysisReport } from "../lib/analysis-report.js";
 import { computeAtsScore } from "../lib/ats-score.js";
-import { parseAutoApplyResponse } from "../lib/auto-apply-response.js";
 import { parseResumeText } from "../lib/resume-structure.js";
 import { cleanupTailoredResumeLogic } from "../lib/tailor-cleanup.js";
 import { parseTailorResponse } from "../lib/tailor-response.js";
 import { ensureTailoredResumeCoverage } from "../lib/job-core-skills.js";
 import { serializeResume } from "../lib/resume-structure.js";
+import {
+  extractDatesFromText,
+  extractEmbeddedJsonJobDates,
+  formatJobDateDisplay,
+  mergeJobDates,
+  parseJsonLdJobDates,
+} from "../lib/job-date-extract.js";
 
 test("parseJsonFromText extracts fenced JSON", () => {
   const parsed = parseJsonFromText('Here you go:\n```json\n{"ok":true,"score":90}\n```');
@@ -28,19 +34,6 @@ test("buildAnalysisReport handles missing inputs", () => {
   const report = buildAnalysisReport("", "");
   assert.equal(report.score, 0);
   assert.match(report.summary, /Add a job description/i);
-});
-
-test("parseAutoApplyResponse normalizes continue plan", () => {
-  const plan = parseAutoApplyResponse(
-    JSON.stringify({
-      status: "continue",
-      summary: "Fill profile fields",
-      steps: [{ action: "fill", targetId: "el-1", value: "Jane Doe" }],
-    })
-  );
-  assert.equal(plan.status, "continue");
-  assert.equal(plan.steps.length, 1);
-  assert.equal(plan.steps[0].action, "fill");
 });
 
 test("parseResumeText extracts skills from Core Skills header", () => {
@@ -240,4 +233,55 @@ test("serializeResume tolerates null experience bullets", () => {
 
   assert.match(text, /Built APIs/);
   assert.doesNotMatch(text, /null/);
+});
+
+test("extractEmbeddedJsonJobDates reads Greenhouse published_at", () => {
+  const snippet = `"published_at":"2026-07-06T16:36:00-04:00","employment":"hidden"`;
+  const dates = extractEmbeddedJsonJobDates(snippet);
+  assert.equal(dates.jobPosted, "2026-07-06T16:36:00-04:00");
+});
+
+test("formatJobDateDisplay formats Greenhouse ISO timestamps", () => {
+  const formatted = formatJobDateDisplay("2026-07-06T16:36:00-04:00");
+  assert.match(formatted, /2026/);
+  assert.match(formatted, /Jul|July/i);
+  assert.match(formatted, /6/);
+});
+
+test("parseJsonLdJobDates reads JobPosting schema dates", () => {
+  const json = JSON.stringify({
+    "@type": "JobPosting",
+    datePosted: "2024-03-15",
+    dateCreated: "2024-03-10",
+    dateModified: "2024-03-20",
+  });
+  const dates = parseJsonLdJobDates(json);
+  assert.equal(dates.jobPosted, "2024-03-15");
+  assert.equal(dates.jobCreated, "2024-03-10");
+  assert.equal(dates.jobModified, "2024-03-20");
+});
+
+test("extractDatesFromText finds posted and modified lines", () => {
+  const text = `Senior Engineer
+Posted 3 days ago
+Last updated yesterday`;
+  const dates = extractDatesFromText(text);
+  assert.equal(dates.jobPosted, "3 days ago");
+  assert.equal(dates.jobModified, "yesterday");
+});
+
+test("mergeJobDates keeps first non-empty value per field", () => {
+  const merged = mergeJobDates(
+    { jobPosted: "Mar 1", jobCreated: "", jobModified: "" },
+    { jobPosted: "Apr 1", jobCreated: "Feb 1", jobModified: "May 1" }
+  );
+  assert.equal(merged.jobPosted, "Mar 1");
+  assert.equal(merged.jobCreated, "Feb 1");
+  assert.equal(merged.jobModified, "May 1");
+});
+
+test("formatJobDateDisplay formats ISO dates", () => {
+  const formatted = formatJobDateDisplay("2024-03-15");
+  assert.match(formatted, /2024/);
+  assert.match(formatted, /Mar|March/i);
 });

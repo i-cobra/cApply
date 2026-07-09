@@ -23,13 +23,10 @@
     'button[type="submit"]',
   ];
 
-  const ASSISTANT_SELECTORS = [
+  const ASSISTANT_TURN_SELECTORS = [
+    ".row-start-2",
     '[data-testid="assistant-turn-content"]',
-    '[data-testid="assistant-message"]',
     ".font-claude-response",
-    '[class*="AssistantTurn"]',
-    '[class*="assistant-turn"]',
-    '[data-is-streaming="false"]',
   ];
 
   /** @type {{ text: string, done: boolean, error: string | null, started: boolean, generation?: number }} */
@@ -410,7 +407,7 @@
       if (
         response.ok &&
         isClaudeStreamResponse(response) &&
-        (isClaudeCompletionUrl(url) || url.includes("/api/"))
+        isClaudeCompletionUrl(url)
       ) {
         const generation = window.__cApplyStreamCapture?.generation ?? streamCaptureGeneration;
         window.__cApplyStreamCapture.started = true;
@@ -459,24 +456,43 @@
     return false;
   }
 
-  function getAssistantMessages() {
-    /** @type {Element[]} */
-    const found = [];
-    const seen = new Set();
+  function getAssistantTurns() {
+    for (const sel of ASSISTANT_TURN_SELECTORS) {
+      const nodes = document.querySelectorAll(sel);
+      if (!nodes.length) continue;
 
-    for (const sel of ASSISTANT_SELECTORS) {
-      for (const el of document.querySelectorAll(sel)) {
+      /** @type {Element[]} */
+      const turns = [];
+      const seen = new Set();
+
+      for (const el of nodes) {
         if (seen.has(el)) continue;
+
+        let nested = false;
+        for (const existing of turns) {
+          if (existing.contains(el) || el.contains(existing)) {
+            nested = true;
+            break;
+          }
+        }
+        if (nested) continue;
+
         seen.add(el);
-        found.push(el);
+        turns.push(el);
       }
+
+      if (turns.length) return turns;
     }
 
-    return found;
+    return [];
   }
 
   function countAssistantMessages() {
-    return getAssistantMessages().length;
+    return getAssistantTurns().length;
+  }
+
+  function getAssistantMessages() {
+    return getAssistantTurns();
   }
 
   function getAssistantResponseText(assistantCountBefore) {
@@ -615,17 +631,19 @@
     const stream = window.__cApplyPollStreamCapture();
     const domText = getAssistantResponseText(assistantCountBefore);
     const generating = stream.generating || isGenerating();
+    const messageCount = countAssistantMessages();
+    const hasNewMessage = messageCount > assistantCountBefore;
 
     if (stream.text) {
       return {
         generating,
-        hasNew: true,
+        hasNew: hasNewMessage,
         textLength: stream.text.length,
         text: stream.text,
         domText,
         hasJson: stream.text.includes("{") || domText.includes("{"),
         fromStream: true,
-        messageCount: countAssistantMessages(),
+        messageCount,
       };
     }
 
@@ -633,20 +651,20 @@
       return { error: stream.error, domText, generating };
     }
 
-    const msgs = getAssistantMessages();
-    const hasNew = msgs.length > assistantCountBefore;
-    const assistant = hasNew ? msgs[msgs.length - 1] : null;
-    const textLength = assistant?.innerText?.length || assistant?.textContent?.length || 0;
+    const msgs = getAssistantTurns();
+    const latestAssistant = hasNewMessage ? msgs[msgs.length - 1] : null;
+    const textLength =
+      latestAssistant?.innerText?.length || latestAssistant?.textContent?.length || 0;
 
     return {
       generating,
-      hasNew,
+      hasNew: hasNewMessage,
       textLength,
       text: domText,
       domText,
       hasJson: domText.includes("{"),
       fromStream: false,
-      messageCount: msgs.length,
+      messageCount,
     };
   };
 

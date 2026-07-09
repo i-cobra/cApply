@@ -32,35 +32,17 @@
   </header>
 
   <main id="panel-profile" class="tab-panel tab-panel-fill" role="tabpanel" aria-labelledby="tab-profile" hidden>
-    <section class="field profile-import-field">
-      <input type="file" id="profileFile" accept=".txt,.md,.pdf" hidden />
-      <div class="profile-actions">
-        <button type="button" id="fillProfileBtn" class="primary profile-action-btn" data-default-label="Import from PDF">
-          Import from PDF
-        </button>
-        <div class="profile-actions-row">
-          <button type="button" id="downloadProfileResumeBtn" class="primary profile-action-btn">Download PDF</button>
-          <button type="button" id="saveProfile" class="primary profile-action-btn">Save profile</button>
-          <button type="button" id="clearProfile" class="primary danger profile-action-btn">Clear</button>
-        </div>
-      </div>
-    </section>
+    <div class="profile-panel">
+      <header class="profile-header">
+        <h2 class="profile-section-title">Master resume</h2>
+        <p class="field-hint profile-header-hint">
+          Your base resume for tailoring. cApply always starts from this copy when you tailor a job.
+        </p>
+      </header>
 
-    <section class="field resume-field-wrap">
-      <div class="field-header">
-        <label>Basic resume</label>
-      </div>
-      <p class="field-hint">Your master resume. Tailoring uses a copy and never changes this.</p>
-      <div id="profileResumeEditor"></div>
-    </section>
-
-    <p id="profileStatus" class="status" role="status" aria-live="polite"></p>
-  </main>
-
-  <main id="panel-application" class="tab-panel active" role="tabpanel" aria-labelledby="tab-application">
-    <section class="field job-field">
-      <div class="application-new-action">
-        <button type="button" id="newApplicationBtn" class="primary action-btn">
+      <section class="profile-toolbar profile-card">
+        <input type="file" id="profileFile" accept=".txt,.md,.pdf" hidden />
+        <button type="button" id="fillProfileBtn" class="primary action-btn profile-import-btn" data-default-label="Import from PDF">
           <span class="action-btn-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -69,75 +51,143 @@
               <path d="M9 14h6" />
             </svg>
           </span>
-          <span class="action-btn-label">New</span>
+          <span class="action-btn-label">Import from PDF</span>
         </button>
-        <button type="button" id="refreshApplicationBtn" class="primary action-btn">
-          <span class="action-btn-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-              <path d="M21 3v6h-6" />
-            </svg>
-          </span>
-          <span class="action-btn-label">Refresh</span>
+        <div class="profile-actions-row">
+          <button type="button" id="downloadProfileResumeBtn" class="secondary action-btn profile-action-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 21h14" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Download</span>
+          </button>
+          <button type="button" id="saveProfile" class="secondary action-btn profile-action-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                <path d="M17 21v-8H7v8" />
+                <path d="M7 3v5h8" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Save</span>
+          </button>
+          <button type="button" id="clearProfile" class="secondary danger action-btn profile-action-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18" />
+                <path d="M8 6V4h8v2" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Clear</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="profile-editor-card profile-card resume-field-wrap">
+        <div class="field-header profile-editor-header">
+          <label>Resume editor</label>
+        </div>
+        <div id="profileResumeEditor"></div>
+      </section>
+
+      <p id="profileStatus" class="status profile-status" role="status" aria-live="polite"></p>
+    </div>
+  </main>
+
+  <main id="panel-application" class="tab-panel active" role="tabpanel" aria-labelledby="tab-application">
+    <div class="application-panel">
+      <div class="application-toolbar">
+        <button
+          type="button"
+          id="editApplicationBtn"
+          class="link-btn application-edit-btn"
+          hidden
+          aria-pressed="false"
+        >
+          Edit
         </button>
-      </div>
-
-      <div class="application-meta-grid">
-        <label>
-          Job URL
-          <input type="url" id="jobUrl" placeholder="https://…" inputmode="url" autocomplete="url" />
-        </label>
-        <label>
-          Position
-          <input type="text" id="position" placeholder="e.g. Senior Developer" />
-        </label>
-        <label>
-          Company name
-          <input type="text" id="companyName" placeholder="e.g. Acme Inc" />
-        </label>
-      </div>
-
-      <div class="field-header">
-        <label for="jobDescription">Job description</label>
-        <div class="field-actions">
-          <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
-          <button type="button" id="restructureJobBtn" class="link-btn" hidden>Restructure job description</button>
+        <div class="application-toolbar-actions">
+          <button type="button" id="newApplicationBtn" class="secondary action-btn application-toolbar-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6" />
+                <path d="M12 11v6" />
+                <path d="M9 14h6" />
+              </svg>
+            </span>
+            <span class="action-btn-label">New</span>
+          </button>
+          <button type="button" id="autoFillApplicationBtn" class="secondary action-btn application-toolbar-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <path d="M14 2v6h6" />
+                <path d="M8 13h8" />
+                <path d="M8 17h5" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Auto fill</span>
+          </button>
         </div>
       </div>
-      <textarea id="jobDescription" rows="6" placeholder="Paste the job posting here…"></textarea>
 
-      <details class="options">
-        <summary>Options</summary>
-        <div class="options-grid">
-          <label>
-            Tone
-            <select id="tone">
-              <option value="professional">Professional</option>
-              <option value="concise">Concise</option>
-              <option value="executive">Executive</option>
-              <option value="friendly">Friendly</option>
-            </select>
-          </label>
-          <label>
-            Output
-            <select id="outputFormat">
-              <option value="full resume">Full resume</option>
-              <option value="resume bullets only">Bullets only</option>
-              <option value="cover letter + resume">Cover letter + resume</option>
-            </select>
-          </label>
-          <label class="checkbox">
-            <input type="checkbox" id="autoSend" checked />
-            <span class="checkbox-text" id="autoSendLabel">Auto-send to ChatGPT</span>
-          </label>
-        </div>
-        <label class="full-width">
-          Extra instructions (optional)
-          <input type="text" id="extraInstructions" placeholder="e.g. Keep to one page, emphasize Python experience" />
-        </label>
-      </details>
+      <div id="applicationFields" class="application-fields">
+        <section class="application-card">
+          <h2 class="application-section-title">Job details</h2>
+          <div class="application-meta-grid">
+            <label>
+              Company
+              <input type="text" id="companyName" placeholder="e.g. Acme Inc" />
+            </label>
+            <label>
+              Position
+              <input type="text" id="position" placeholder="e.g. Senior Developer" />
+            </label>
+            <label class="application-url-field">
+              Job URL
+              <input type="url" id="jobUrl" placeholder="https://…" inputmode="url" autocomplete="url" />
+            </label>
+          </div>
 
-      <div class="application-actions">
+          <div class="application-dates-block">
+            <p class="application-dates-label">Posting dates</p>
+            <div class="application-dates-grid">
+              <label>
+                Posted
+                <input type="text" id="jobPosted" placeholder="—" />
+              </label>
+              <label>
+                Created
+                <input type="text" id="jobCreated" placeholder="—" />
+              </label>
+              <label>
+                Modified
+                <input type="text" id="jobModified" placeholder="—" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="application-card application-description-card">
+          <div class="field-header">
+            <label for="jobDescription">Job description</label>
+            <div class="field-actions">
+              <button type="button" id="grabFromPage" class="link-btn">Grab from page</button>
+              <button type="button" id="restructureJobBtn" class="link-btn" hidden>Restructure</button>
+            </div>
+          </div>
+          <textarea id="jobDescription" rows="7" placeholder="Paste the job posting here, or use Auto fill from the open tab…"></textarea>
+        </section>
+      </div>
+
+      <div class="application-action-bar">
         <button
           type="button"
           id="tailorBtn"
@@ -148,78 +198,69 @@
           <span class="action-btn-icon tailor-btn-icon" id="tailorBtnIcon" aria-hidden="true"></span>
           <span class="action-btn-label tailor-btn-label">Tailor</span>
         </button>
-      </div>
-
-      <div id="applicationActionsSecondary" class="application-actions application-actions-secondary" hidden>
-        <button type="button" id="autoApplyBtn" class="primary action-btn">
-          <span class="action-btn-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M5 12h14" />
-              <path d="m12 5 7 7-7 7" />
-              <path d="M19 5v4a2 2 0 0 1-2 2h-3" />
-            </svg>
-          </span>
-          <span class="action-btn-label">Auto Apply</span>
-        </button>
-        <button type="button" id="downloadResumeBtn" class="primary action-btn">
-          <span class="action-btn-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 3v12" />
-              <path d="m7 10 5 5 5-5" />
-              <path d="M5 21h14" />
-            </svg>
-          </span>
-          <span class="action-btn-label">Download resume</span>
-        </button>
-        <button type="button" id="previewResumeBtn" class="primary action-btn">
-          <span class="action-btn-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
-          </span>
-          <span class="action-btn-label">Preview resume</span>
-        </button>
-      </div>
-
-      <section id="atsScoreSection" class="field ats-score-section" hidden>
-        <div class="field-header">
-          <label>ATS score</label>
-          <span id="atsResumeSource" class="ats-source-badge">ChatGPT</span>
+        <div id="applicationActionsSecondary" class="application-actions-secondary" hidden>
+          <button type="button" id="downloadResumeBtn" class="secondary action-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v12" />
+                <path d="m7 10 5 5 5-5" />
+                <path d="M5 21h14" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Download</span>
+          </button>
+          <button type="button" id="previewResumeBtn" class="secondary action-btn">
+            <span class="action-btn-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </span>
+            <span class="action-btn-label">Preview</span>
+          </button>
         </div>
-        <div class="ats-score-card">
-          <div
-            id="atsScoreRing"
-            class="ats-score-ring"
-            role="img"
-            aria-label="ATS match score"
-          >
-            <span id="atsScoreValue" class="ats-score-value">—</span>
-            <span class="ats-score-unit">%</span>
+      </div>
+
+      <div class="application-results">
+        <section id="atsScoreSection" class="application-card ats-score-section" hidden>
+          <div class="field-header">
+            <label>ATS score</label>
+            <span id="atsResumeSource" class="ats-source-badge">ChatGPT</span>
           </div>
-          <div class="ats-score-details">
-            <p id="atsScoreSummary" class="ats-score-summary"></p>
+          <div class="ats-score-card">
+            <div
+              id="atsScoreRing"
+              class="ats-score-ring"
+              role="img"
+              aria-label="ATS match score"
+            >
+              <span id="atsScoreValue" class="ats-score-value">—</span>
+              <span class="ats-score-unit">%</span>
+            </div>
+            <div class="ats-score-details">
+              <p id="atsScoreSummary" class="ats-score-summary"></p>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="coverLetterSection" class="field cover-letter-section" hidden>
-        <div class="field-header">
-          <label for="coverLetter">Cover letter</label>
-          <button type="button" id="copyCoverLetterBtn" class="link-btn">Copy</button>
-        </div>
-        <textarea id="coverLetter" rows="8" placeholder="Tailored cover letter appears here when requested in Options…"></textarea>
-      </section>
+        <section id="coverLetterSection" class="application-card cover-letter-section" hidden>
+          <div class="field-header">
+            <label for="coverLetter">Cover letter</label>
+            <button type="button" id="copyCoverLetterBtn" class="link-btn">Copy</button>
+          </div>
+          <textarea id="coverLetter" rows="6" placeholder="Appears here when cover letter output is selected in Settings…"></textarea>
+        </section>
 
-      <p id="status" class="status" role="status" aria-live="polite"></p>
-    </section>
-
-    <section id="tailoredResumeSection" class="field resume-field-wrap tailored-resume-section" hidden>
-      <div class="field-header">
-        <label>Tailored resume</label>
+        <section id="tailoredResumeSection" class="application-card resume-field-wrap tailored-resume-section" hidden>
+          <div class="field-header">
+            <label>Tailored resume</label>
+          </div>
+          <div id="tailoredResumeEditor"></div>
+        </section>
       </div>
-      <div id="tailoredResumeEditor"></div>
-    </section>
+
+      <p id="status" class="status application-status" role="status" aria-live="polite"></p>
+    </div>
   </main>
 
   <main id="panel-history" class="tab-panel" role="tabpanel" aria-labelledby="tab-history" hidden>
@@ -326,31 +367,6 @@
             <option value="claude">Claude web</option>
           </select>
         </label>
-        <label>
-          Default tone
-          <select id="settingsDefaultTone">
-            <option value="professional">Professional</option>
-            <option value="concise">Concise</option>
-            <option value="executive">Executive</option>
-            <option value="friendly">Friendly</option>
-          </select>
-        </label>
-        <label>
-          Default output
-          <select id="settingsDefaultOutput">
-            <option value="full resume">Full resume</option>
-            <option value="resume bullets only">Bullets only</option>
-            <option value="cover letter + resume">Cover letter + resume</option>
-          </select>
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" id="settingsAutoSend" />
-          <span class="checkbox-text" id="settingsAutoSendLabel">Auto-send to ChatGPT by default</span>
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" id="settingsHybridAutoApply" />
-          <span class="checkbox-text">Hybrid auto-apply (platform rules before ChatGPT)</span>
-        </label>
         <label class="checkbox">
           <input type="checkbox" id="settingsUseOpenAiApi" />
           <span class="checkbox-text">Use OpenAI API instead of ChatGPT web</span>
@@ -364,6 +380,43 @@
           <input type="password" id="settingsOpenAiApiKey" placeholder="sk-…" autocomplete="off" />
         </label>
       </div>
+
+      <section class="settings-options-section">
+        <div class="field-header">
+          <label>Tailor options</label>
+        </div>
+        <div class="options-grid">
+          <label>
+            Tone
+            <select id="settingsDefaultTone">
+              <option value="professional">Professional</option>
+              <option value="concise">Concise</option>
+              <option value="executive">Executive</option>
+              <option value="friendly">Friendly</option>
+            </select>
+          </label>
+          <label>
+            Output
+            <select id="settingsDefaultOutput">
+              <option value="full resume">Full resume</option>
+              <option value="resume bullets only">Bullets only</option>
+              <option value="cover letter + resume">Cover letter + resume</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="settingsAutoSend" />
+            <span class="checkbox-text" id="settingsAutoSendLabel">Auto-send to ChatGPT by default</span>
+          </label>
+        </div>
+        <label class="full-width">
+          Extra instructions (optional)
+          <input
+            type="text"
+            id="settingsExtraInstructions"
+            placeholder="e.g. Keep to one page, emphasize Python experience"
+          />
+        </label>
+      </section>
 
       <section class="settings-prompt-section">
         <div class="field-header">

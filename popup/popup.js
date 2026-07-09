@@ -77,19 +77,19 @@ const els = {
   companyName: document.getElementById("companyName"),
   position: document.getElementById("position"),
   jobUrl: document.getElementById("jobUrl"),
-  tone: document.getElementById("tone"),
-  outputFormat: document.getElementById("outputFormat"),
-  autoSend: document.getElementById("autoSend"),
-  extraInstructions: document.getElementById("extraInstructions"),
+  jobPosted: document.getElementById("jobPosted"),
+  jobCreated: document.getElementById("jobCreated"),
+  jobModified: document.getElementById("jobModified"),
   tailorBtn: document.getElementById("tailorBtn"),
   tailorBtnIcon: document.getElementById("tailorBtnIcon"),
   tailorBtnLabel: document.querySelector("#tailorBtn .tailor-btn-label"),
   applicationActionsSecondary: document.getElementById("applicationActionsSecondary"),
   downloadResumeBtn: document.getElementById("downloadResumeBtn"),
   previewResumeBtn: document.getElementById("previewResumeBtn"),
-  autoApplyBtn: document.getElementById("autoApplyBtn"),
   newApplicationBtn: document.getElementById("newApplicationBtn"),
-  refreshApplicationBtn: document.getElementById("refreshApplicationBtn"),
+  editApplicationBtn: document.getElementById("editApplicationBtn"),
+  applicationFields: document.getElementById("applicationFields"),
+  autoFillApplicationBtn: document.getElementById("autoFillApplicationBtn"),
   grabFromPage: document.getElementById("grabFromPage"),
   restructureJobBtn: document.getElementById("restructureJobBtn"),
   clearProfile: document.getElementById("clearProfile"),
@@ -133,9 +133,9 @@ const els = {
   settingsStatus: document.getElementById("settingsStatus"),
   settingsDefaultTone: document.getElementById("settingsDefaultTone"),
   settingsDefaultOutput: document.getElementById("settingsDefaultOutput"),
+  settingsExtraInstructions: document.getElementById("settingsExtraInstructions"),
   settingsLlmProvider: document.getElementById("settingsLlmProvider"),
   settingsAutoSend: document.getElementById("settingsAutoSend"),
-  settingsHybridAutoApply: document.getElementById("settingsHybridAutoApply"),
   settingsUseOpenAiApi: document.getElementById("settingsUseOpenAiApi"),
   settingsOpenAiModel: document.getElementById("settingsOpenAiModel"),
   settingsOpenAiApiKey: document.getElementById("settingsOpenAiApiKey"),
@@ -143,7 +143,6 @@ const els = {
   settingsPromptModifyFillProfile: document.getElementById("settingsPromptModifyFillProfile"),
   settingsPromptModifyRestructure: document.getElementById("settingsPromptModifyRestructure"),
   appSubtitle: document.getElementById("appSubtitle"),
-  autoSendLabel: document.getElementById("autoSendLabel"),
   settingsAutoSendLabel: document.getElementById("settingsAutoSendLabel"),
   settingsPromptHint: document.getElementById("settingsPromptHint"),
   onboardingOverlay: document.getElementById("onboardingOverlay"),
@@ -193,13 +192,13 @@ let activeJobContextKey = null;
 let tailorInProgress = false;
 
 /** @type {boolean} */
-let autoApplyInProgress = false;
-
-/** @type {boolean} */
 let restructureInProgress = false;
 
 /** @type {boolean} */
 let tailoredResumeReady = false;
+
+/** @type {boolean} */
+let applicationEditMode = false;
 
 /** @type {string} */
 let latestCoverLetter = "";
@@ -221,7 +220,6 @@ let appSettings = null;
 let tailorSession = null;
 
 const TAILOR_TIMEOUT_MS = 320_000;
-const AUTO_APPLY_TIMEOUT_MS = 900_000;
 
 function getActiveLlmLabel() {
   return getLlmProviderLabel(appSettings);
@@ -231,9 +229,6 @@ function updateProviderUi() {
   const label = getActiveLlmLabel();
   if (els.appSubtitle) {
     els.appSubtitle.textContent = `Tailor your resume with ${label}`;
-  }
-  if (els.autoSendLabel) {
-    els.autoSendLabel.textContent = `Auto-send to ${label}`;
   }
   if (els.settingsAutoSendLabel) {
     els.settingsAutoSendLabel.textContent = `Auto-send to ${label} by default`;
@@ -273,6 +268,7 @@ async function init() {
   appSettings = await loadSettings();
   applySettingsToForm(appSettings);
   updateProviderUi();
+  updateCoverLetterVisibility();
 
   const tab = await getActiveBrowserTab();
   if (tab) {
@@ -300,10 +296,10 @@ async function init() {
 
   els.tailorBtn.addEventListener("click", onTailor);
   els.newApplicationBtn.addEventListener("click", onNewApplication);
-  els.refreshApplicationBtn.addEventListener("click", onRefreshApplication);
+  els.editApplicationBtn.addEventListener("click", onToggleApplicationEdit);
+  els.autoFillApplicationBtn.addEventListener("click", onAutoFillApplication);
   els.downloadResumeBtn.addEventListener("click", onDownloadTailoredResume);
   els.previewResumeBtn.addEventListener("click", onPreviewTailoredResume);
-  els.autoApplyBtn.addEventListener("click", onAutoApplyJob);
   els.grabFromPage.addEventListener("click", onGrabFromPage);
   els.restructureJobBtn.addEventListener("click", onRestructureJobDescription);
   els.clearProfile.addEventListener("click", onClearProfile);
@@ -315,7 +311,7 @@ async function init() {
   els.companyName.addEventListener("input", scheduleJobContextSave);
   els.position.addEventListener("input", scheduleJobContextSave);
   els.jobUrl.addEventListener("input", scheduleJobContextSave);
-  els.outputFormat.addEventListener("change", updateCoverLetterVisibility);
+  els.settingsDefaultOutput?.addEventListener("change", updateCoverLetterVisibility);
   els.clearHistory.addEventListener("click", onClearHistory);
   els.historyList.addEventListener("click", onHistoryListClick);
   els.historyCompanySearch.addEventListener("input", () => renderHistory());
@@ -421,6 +417,9 @@ function collectApplicationState() {
     companyName: els.companyName.value.trim(),
     position: els.position.value.trim(),
     jobUrl: els.jobUrl.value.trim(),
+    jobPosted: els.jobPosted.value.trim(),
+    jobCreated: els.jobCreated.value.trim(),
+    jobModified: els.jobModified.value.trim(),
     resumeText: hasTailored ? resumeText : "",
     structured: hasTailored ? structured : null,
     changes: latestTailorChanges,
@@ -437,6 +436,9 @@ function applyApplicationState(state) {
   els.companyName.value = state?.companyName ?? "";
   els.position.value = state?.position ?? "";
   els.jobUrl.value = state?.jobUrl ?? "";
+  els.jobPosted.value = state?.jobPosted ?? "";
+  els.jobCreated.value = state?.jobCreated ?? "";
+  els.jobModified.value = state?.jobModified ?? "";
   latestTailorChanges = state?.changes ?? [];
   latestAtsFromAi = state?.atsScore ?? null;
   latestCoverLetter = state?.coverLetter ?? "";
@@ -470,6 +472,7 @@ function resetTailoredApplicationUi() {
   els.coverLetter.value = "";
   els.coverLetterSection.hidden = true;
   tailoredResumeReady = false;
+  applicationEditMode = false;
   tailoredEditor.setStructured(emptyResume(), { silent: true });
   els.tailoredResumeSection.hidden = true;
   els.atsScoreSection.hidden = true;
@@ -492,6 +495,71 @@ function getTailorActionLabel() {
     : els.tailorBtn.dataset.tailorLabel || "Tailor";
 }
 
+function getApplicationFieldElements() {
+  return [
+    els.jobUrl,
+    els.position,
+    els.companyName,
+    els.jobPosted,
+    els.jobCreated,
+    els.jobModified,
+    els.jobDescription,
+  ].filter(Boolean);
+}
+
+/**
+ * @param {boolean} locked
+ */
+function setApplicationFieldsLocked(locked) {
+  for (const el of getApplicationFieldElements()) {
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+      if (el.type === "checkbox") {
+        el.disabled = locked;
+      } else {
+        el.readOnly = locked;
+      }
+      continue;
+    }
+    if (el instanceof HTMLSelectElement) {
+      el.disabled = locked;
+    }
+  }
+
+  els.applicationFields?.classList.toggle("is-locked", locked);
+}
+
+function updateApplicationFieldEditing() {
+  const hasTailored = hasTailoredResume() && !tailorInProgress;
+  const editable = !hasTailored || applicationEditMode;
+
+  els.editApplicationBtn.hidden = !hasTailored;
+  els.editApplicationBtn.textContent = applicationEditMode ? "Done" : "Edit";
+  els.editApplicationBtn.setAttribute("aria-pressed", String(applicationEditMode));
+  setApplicationFieldsLocked(!editable);
+
+  if (!hasTailored) {
+    applicationEditMode = false;
+    els.editApplicationBtn.setAttribute("aria-pressed", "false");
+  }
+}
+
+function onToggleApplicationEdit() {
+  if (!hasTailoredResume() || tailorInProgress) return;
+
+  applicationEditMode = !applicationEditMode;
+  updateApplicationFieldEditing();
+  updateJobDescriptionActions();
+
+  if (applicationEditMode) {
+    els.jobDescription.focus();
+    setStatus("Application fields unlocked for editing.", "success");
+    return;
+  }
+
+  setStatus("Application fields locked.", "success");
+  void persistJobContext();
+}
+
 function updateApplicationActionButton() {
   if (
     !tailorInProgress &&
@@ -501,14 +569,13 @@ function updateApplicationActionButton() {
     tailoredResumeReady = false;
   }
 
-  const showSecondary = hasTailoredResume() && !tailorInProgress && !autoApplyInProgress;
+  const showSecondary = hasTailoredResume() && !tailorInProgress;
 
   els.applicationActionsSecondary.hidden = !showSecondary;
   setTailorBtnLabel(getTailorActionLabel());
-  els.tailorBtn.disabled = tailorInProgress || autoApplyInProgress;
-  els.downloadResumeBtn.disabled = tailorInProgress || autoApplyInProgress;
-  els.previewResumeBtn.disabled = tailorInProgress || autoApplyInProgress;
-  els.autoApplyBtn.disabled = tailorInProgress || autoApplyInProgress;
+  els.tailorBtn.disabled = tailorInProgress;
+  els.downloadResumeBtn.disabled = tailorInProgress;
+  els.previewResumeBtn.disabled = tailorInProgress;
 
   if (tailorInProgress) {
     els.tailorBtn.classList.add("busy");
@@ -518,22 +585,31 @@ function updateApplicationActionButton() {
     els.tailorBtn.setAttribute("aria-busy", "false");
   }
 
+  updateApplicationFieldEditing();
   updateJobDescriptionActions();
   updateAtsScore();
 }
 
 function updateJobDescriptionActions() {
   const hasJobText = Boolean(els.jobDescription.value.trim());
+  const applicationEditable = !hasTailoredResume() || applicationEditMode;
   const showRestructure =
     hasJobText &&
+    applicationEditable &&
     !hasTailoredResume() &&
     !tailorInProgress &&
-    !autoApplyInProgress &&
+    !tailorInProgress &&
     !restructureInProgress;
 
   els.restructureJobBtn.hidden = !showRestructure;
-  els.grabFromPage.disabled = tailorInProgress || autoApplyInProgress || restructureInProgress;
+  els.grabFromPage.disabled =
+    !applicationEditable ||
+    tailorInProgress ||
+    restructureInProgress;
   els.restructureJobBtn.disabled = restructureInProgress;
+  els.autoFillApplicationBtn.disabled =
+    (!applicationEditable && hasTailoredResume()) ||
+    tailorInProgress;
 }
 
 function getApplicationPosition() {
@@ -602,65 +678,6 @@ async function onPreviewTailoredResume() {
   }
 }
 
-async function onAutoApplyJob() {
-  const structured = tailoredEditor.getStructured();
-  const resumeText = tailoredEditor.getText().trim();
-
-  if (!resumeText) {
-    setStatus("Tailor a resume first, then try Auto Apply.", "error");
-    updateApplicationActionButton();
-    return;
-  }
-
-  const browserTab = await getActiveBrowserTab();
-  if (!browserTab) {
-    setStatus("No active browser tab found.", "error");
-    return;
-  }
-
-  autoApplyInProgress = true;
-  updateApplicationActionButton();
-  setStatus("Auto Apply started — ChatGPT is planning form actions…");
-
-  try {
-    await ensurePageAccess();
-    const response = await sendBackgroundMessage(
-      {
-        type: "AUTO_APPLY_JOB",
-        payload: {
-          structured,
-          companyName: els.companyName.value.trim(),
-          position: getApplicationPosition(),
-          jobUrl: els.jobUrl.value.trim(),
-          jobDescription: els.jobDescription.value.trim(),
-          jobWindowId: browserTab.windowId,
-        },
-      },
-      AUTO_APPLY_TIMEOUT_MS
-    );
-
-    if (response === undefined) {
-      throw new Error(
-        "Lost connection to the extension background. Reload cApply in chrome://extensions and try again."
-      );
-    }
-
-    if (!response?.ok) {
-      throw new Error(response?.error || "Auto Apply failed.");
-    }
-
-    setStatus(
-      response.summary || "Auto Apply completed on the job page.",
-      "success"
-    );
-  } catch (err) {
-    setStatus(err.message, "error");
-  } finally {
-    autoApplyInProgress = false;
-    updateApplicationActionButton();
-  }
-}
-
 async function onNewApplication() {
   if (tailorInProgress) {
     setStatus("Wait for tailoring to finish.", "error");
@@ -671,6 +688,10 @@ async function onNewApplication() {
   els.companyName.value = "";
   els.position.value = "";
   els.jobUrl.value = "";
+  els.jobPosted.value = "";
+  els.jobCreated.value = "";
+  els.jobModified.value = "";
+  applicationEditMode = false;
   resetTailoredApplicationUi();
   setStatus("");
 
@@ -680,6 +701,9 @@ async function onNewApplication() {
     companyName: "",
     position: "",
     jobUrl: "",
+    jobPosted: "",
+    jobCreated: "",
+    jobModified: "",
     resumeText: "",
     structured: null,
     changes: [],
@@ -700,14 +724,14 @@ async function onNewApplication() {
   els.jobDescription.focus();
 }
 
-async function onRefreshApplication() {
-  if (tailorInProgress || autoApplyInProgress) {
+async function onAutoFillApplication() {
+  if (tailorInProgress) {
     setStatus("Wait for the current operation to finish.", "error");
     return;
   }
 
-  setStatus("Refreshing from current page…");
-  els.refreshApplicationBtn.disabled = true;
+  setStatus("Auto filling from current page…");
+  els.autoFillApplicationBtn.disabled = true;
 
   try {
     const tab = await getActiveBrowserTab();
@@ -722,16 +746,14 @@ async function onRefreshApplication() {
 
     await ensurePageAccess();
     const response = await chrome.runtime.sendMessage({ type: "GRAB_PAGE_TEXT" });
-    if (!response?.ok) throw new Error(response?.error || "Failed to refresh from page");
+    if (!response?.ok) throw new Error(response?.error || "Failed to auto fill from page");
 
     els.jobDescription.value = response.text;
     if (response.pageUrl) {
       els.jobUrl.value = response.pageUrl;
     }
     if (response.meta) {
-      if (response.meta.companyName) els.companyName.value = response.meta.companyName;
-      if (response.meta.position) els.position.value = response.meta.position;
-      if (response.meta.applyUrl) els.jobUrl.value = response.meta.applyUrl;
+      applyGrabMeta(response.meta, { overwrite: true });
     }
 
     latestAtsFromAi = null;
@@ -739,11 +761,12 @@ async function onRefreshApplication() {
     updateAtsScore();
     renderAnalysis();
     updateJobDescriptionActions();
-    setStatus("Application refreshed from the current page.", "success");
+    setStatus("Application auto filled from the current page.", "success");
   } catch (err) {
     setStatus(err.message, "error");
   } finally {
-    els.refreshApplicationBtn.disabled = tailorInProgress || autoApplyInProgress;
+    els.autoFillApplicationBtn.disabled = false;
+    updateJobDescriptionActions();
   }
 }
 
@@ -890,16 +913,15 @@ function showSettingsPanel() {
  * @param {import("../lib/settings.js").AppSettings} settings
  */
 function applySettingsToForm(settings) {
-  els.tone.value = settings.defaultTone;
-  els.outputFormat.value = settings.defaultOutputFormat;
-  els.autoSend.checked = settings.autoSend;
   els.settingsDefaultTone.value = settings.defaultTone;
   els.settingsDefaultOutput.value = settings.defaultOutputFormat;
   if (els.settingsLlmProvider) {
     els.settingsLlmProvider.value = settings.llmProvider || "chatgpt";
   }
   els.settingsAutoSend.checked = settings.autoSend;
-  els.settingsHybridAutoApply.checked = settings.hybridAutoApply;
+  if (els.settingsExtraInstructions) {
+    els.settingsExtraInstructions.value = settings.extraInstructions || "";
+  }
   els.settingsUseOpenAiApi.checked = settings.useOpenAiApi;
   els.settingsOpenAiModel.value = settings.openAiModel;
   els.settingsOpenAiApiKey.value = settings.openAiApiKey;
@@ -920,7 +942,7 @@ async function onSaveSettings() {
     defaultOutputFormat: els.settingsDefaultOutput.value,
     llmProvider: els.settingsLlmProvider?.value || "chatgpt",
     autoSend: els.settingsAutoSend.checked,
-    hybridAutoApply: els.settingsHybridAutoApply.checked,
+    extraInstructions: els.settingsExtraInstructions?.value.trim() || "",
     useOpenAiApi: els.settingsUseOpenAiApi.checked,
     openAiModel: els.settingsOpenAiModel.value.trim() || "gpt-4o-mini",
     openAiApiKey: els.settingsOpenAiApiKey.value.trim(),
@@ -930,12 +952,13 @@ async function onSaveSettings() {
   });
   applySettingsToForm(appSettings);
   updateProviderUi();
+  updateCoverLetterVisibility();
   els.settingsStatus.textContent = "Settings saved.";
   els.settingsStatus.className = "status success";
 }
 
 function updateCoverLetterVisibility() {
-  const wantsCoverLetter = els.outputFormat.value === "cover letter + resume";
+  const wantsCoverLetter = appSettings.defaultOutputFormat === "cover letter + resume";
   const hasLetter = Boolean(latestCoverLetter.trim() || els.coverLetter.value.trim());
   els.coverLetterSection.hidden = !(wantsCoverLetter || hasLetter);
 }
@@ -1150,6 +1173,7 @@ async function openHistoryEntry(entry) {
   latestCoverLetter = entry.coverLetter || "";
   els.coverLetter.value = latestCoverLetter;
   updateCoverLetterVisibility();
+  applicationEditMode = false;
   showTailoredResume(entry.structured, entry.changes, entry.atsScore);
   activeJobContextKey = getJobContextKey(entry.jobUrl || "", undefined);
   await persistJobContext(activeJobContextKey);
@@ -1661,6 +1685,33 @@ async function ensurePageAccess() {
   }
 }
 
+/**
+ * @param {{
+ *   companyName?: string,
+ *   position?: string,
+ *   applyUrl?: string,
+ *   jobPosted?: string,
+ *   jobCreated?: string,
+ *   jobModified?: string
+ * } | null | undefined} meta
+ * @param {{ overwrite?: boolean }} [options]
+ */
+function applyGrabMeta(meta, { overwrite = false } = {}) {
+  if (!meta) return;
+
+  const set = (el, value) => {
+    if (!value) return;
+    if (overwrite || !el.value.trim()) el.value = value;
+  };
+
+  set(els.companyName, meta.companyName);
+  set(els.position, meta.position);
+  set(els.jobUrl, meta.applyUrl);
+  set(els.jobPosted, meta.jobPosted);
+  set(els.jobCreated, meta.jobCreated);
+  set(els.jobModified, meta.jobModified);
+}
+
 async function onGrabFromPage() {
   setStatus("Grabbing text from page…");
   els.grabFromPage.disabled = true;
@@ -1674,15 +1725,7 @@ async function onGrabFromPage() {
       els.jobUrl.value = response.pageUrl;
     }
     if (response.meta) {
-      if (response.meta.companyName && !els.companyName.value.trim()) {
-        els.companyName.value = response.meta.companyName;
-      }
-      if (response.meta.position && !els.position.value.trim()) {
-        els.position.value = response.meta.position;
-      }
-      if (response.meta.applyUrl && !els.jobUrl.value.trim()) {
-        els.jobUrl.value = response.meta.applyUrl;
-      }
+      applyGrabMeta(response.meta);
     }
     latestAtsFromAi = null;
     await persistJobContext();
@@ -1725,7 +1768,7 @@ async function onRestructureJobDescription() {
           jobDescription,
           position: els.position.value.trim(),
           companyName: els.companyName.value.trim(),
-          autoSend: els.autoSend.checked,
+          autoSend: appSettings.autoSend,
           jobWindowId: browserTab?.windowId,
         },
       },
@@ -1743,7 +1786,7 @@ async function onRestructureJobDescription() {
     }
 
     if (!response.responseText?.trim()) {
-      if (els.autoSend.checked) {
+      if (appSettings.autoSend) {
         throw new Error(
           `${llmLabel} finished but no restructured text was captured. Check the ${llmLabel} tab and try again.`
         );
@@ -1784,12 +1827,19 @@ async function onRestructureJobDescription() {
 function setProfileFillBusy(busy) {
   const defaultLabel =
     els.fillProfileBtn.dataset.defaultLabel || "Import from PDF";
+  const labelEl = els.fillProfileBtn.querySelector(".action-btn-label");
 
   els.fillProfileBtn.disabled = busy;
   els.fillProfileBtn.classList.toggle("busy", busy);
   els.fillProfileBtn.setAttribute("aria-busy", String(busy));
-  els.fillProfileBtn.textContent = busy ? "Importing…" : defaultLabel;
+  if (labelEl) {
+    labelEl.textContent = busy ? "Importing…" : defaultLabel;
+  } else {
+    els.fillProfileBtn.textContent = busy ? "Importing…" : defaultLabel;
+  }
   els.downloadProfileResumeBtn.disabled = busy;
+  els.saveProfile.disabled = busy;
+  els.clearProfile.disabled = busy;
 }
 
 function onFillProfile() {
@@ -1880,7 +1930,6 @@ function setTailorBusy(busy) {
     els.tailorBtn.disabled = true;
     els.downloadResumeBtn.disabled = true;
     els.previewResumeBtn.disabled = true;
-    els.autoApplyBtn.disabled = true;
     els.tailorBtn.classList.add("busy");
     els.tailorBtn.setAttribute("aria-busy", "true");
     setTailorBtnLabel("Tailoring…");
@@ -1930,7 +1979,7 @@ async function onTailor() {
 
   const llmLabel = getActiveLlmLabel();
   setTailorBusy(true);
-  if (!els.autoSend.checked) {
+  if (!appSettings.autoSend) {
     setStatus(`Opening ${llmLabel} and inserting prompt…`);
   } else {
     setStatus("");
@@ -1941,13 +1990,13 @@ async function onTailor() {
       type: "TAILOR_RESUME",
       payload: {
         jobDescription,
-        autoSend: els.autoSend.checked,
+        autoSend: appSettings.autoSend,
         jobWindowId: browserTab.windowId,
         options: {
-          tone: els.tone.value,
-          outputFormat: els.outputFormat.value,
+          tone: appSettings.defaultTone,
+          outputFormat: appSettings.defaultOutputFormat,
           emphasize: ["keywords", "achievements", "ats", "skills", "summary"],
-          extraInstructions: els.extraInstructions.value.trim(),
+          extraInstructions: appSettings.extraInstructions || "",
           targetRole: getApplicationPosition(),
         },
       },
@@ -2008,7 +2057,7 @@ async function onTailor() {
       activeBrowserTabId = tailorSession.tabId;
       setActiveTab("application");
       setStatus("");
-    } else if (els.autoSend.checked) {
+    } else if (appSettings.autoSend) {
       setStatus(
         `${llmLabel} finished but no JSON response was captured. Check the ${llmLabel} tab.`,
         "error"

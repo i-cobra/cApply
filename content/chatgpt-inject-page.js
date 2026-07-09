@@ -693,16 +693,19 @@
     const domText = getAssistantResponseText(assistantCountBefore);
     const generating = stream.generating || isGenerating();
 
+    const messageCount = countAssistantMessages();
+    const hasNewMessage = messageCount > assistantCountBefore;
+
     if (stream.text) {
       return {
         generating,
-        hasNew: true,
+        hasNew: hasNewMessage,
         textLength: stream.text.length,
         text: stream.text,
         domText,
         hasJson: stream.text.includes("{") || domText.includes("{"),
         fromStream: true,
-        messageCount: countAssistantMessages(),
+        messageCount,
       };
     }
 
@@ -711,19 +714,19 @@
     }
 
     const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-    const hasNew = msgs.length > assistantCountBefore;
-    const assistant = hasNew ? msgs[msgs.length - 1] : null;
-    const textLength = assistant?.innerText?.length || assistant?.textContent?.length || 0;
+    const latestAssistant = hasNewMessage ? msgs[msgs.length - 1] : null;
+    const textLength =
+      latestAssistant?.innerText?.length || latestAssistant?.textContent?.length || 0;
 
     return {
       generating,
-      hasNew,
+      hasNew: hasNewMessage,
       textLength,
       text: domText,
       domText,
       hasJson: domText.includes("{"),
       fromStream: false,
-      messageCount: msgs.length,
+      messageCount,
     };
   };
 

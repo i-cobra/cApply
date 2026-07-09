@@ -1,22 +1,12 @@
-import { buildFillProfilePrompt, buildTailorPrompt, buildAutoApplyPrompt, buildRestructureJobDescriptionPrompt } from "./lib/prompt.js";
+import { buildFillProfilePrompt, buildTailorPrompt, buildRestructureJobDescriptionPrompt } from "./lib/prompt.js";
 import { parseTailorResponse, hasTailoredContent } from "./lib/tailor-response.js";
 import { parseRestructureJobResponse } from "./lib/restructure-job-response.js";
-import {
-  autoApplyResponseLooksComplete,
-  hasAutoApplyMarkers,
-  isUsableAutoApplyResponse,
-  parseAutoApplyResponse,
-} from "./lib/auto-apply-response.js";
-import { serializeResume, resumeToLlmShape } from "./lib/resume-structure.js";
-import {
-  buildResumeDownloadFilename,
-  encodeResumePdfBase64,
-} from "./lib/resume-pdf.js";
+import { serializeResume } from "./lib/resume-structure.js";
+import { encodeResumePdfBase64 } from "./lib/resume-pdf.js";
 import { loadJobContext, ACTIVE_CONTEXT_KEY, SHARED_CONTEXT_KEY } from "./lib/job-context.js";
 import { inferJobRole } from "./lib/tailor-history.js";
 import { loadSettings, mergePromptInstructions } from "./lib/settings.js";
 import { callOpenAiChat } from "./lib/openai-api.js";
-import { getHybridAutoApplySteps } from "./lib/auto-apply-hybrid.js";
 import {
   CHATGPT_MODEL_HIGH,
   CHATGPT_MODEL_INSTANT,
@@ -28,6 +18,12 @@ import {
   isProviderUrl,
   LLM_PROVIDERS,
 } from "./lib/llm-provider.js";
+import {
+  extractDatesFromText,
+  formatJobDates,
+  mergeJobDates,
+} from "./lib/job-date-extract.js";
+import { parseGreenhouseRemixJob } from "./lib/greenhouse-remix.js";
 import "./lib/jspdf/jspdf.umd.min.js";
 
 const CHATGPT_PROVIDER = LLM_PROVIDERS.chatgpt;
@@ -99,13 +95,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "REFRESH_RESUME_PREVIEW") {
     handleRefreshResumePreview()
-      .then(sendResponse)
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
-    return true;
-  }
-
-  if (message.type === "AUTO_APPLY_JOB") {
-    handleAutoApplyJob(message.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -225,360 +214,46 @@ async function handleGrabPageText() {
     throw new Error("Could not extract text from this page.");
   }
 
-  return { ok: true, text, meta: result?.meta || null, pageUrl: url };
-}
+  let finalText = text;
+  let meta = result?.meta || null;
 
-const AUTO_APPLY_MAX_ROUNDS = 8;
-
-async function handleAutoApplyJob(payload) {
-  const {
-    structured,
-    companyName = "",
-    position = "",
-    jobUrl = "",
-    jobDescription = "",
-    jobWindowId,
-  } = payload || {};
-
-  if (!structured || !serializeResume(structured).trim()) {
-    throw new Error("Tailor a resume first, then try Auto Apply.");
-  }
-
-  const [jobTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const jobTabId = jobTab?.id;
-  const pageUrl = jobTab?.url || "";
-
-  if (!jobTabId) {
-    throw new Error("No active browser tab. Open the job posting page first.");
-  }
-
-  if (
-    pageUrl.startsWith("chrome://") ||
-    pageUrl.startsWith("chrome-extension://") ||
-    pageUrl.startsWith("edge://") ||
-    pageUrl.startsWith("about:")
-  ) {
-    throw new Error("Open the job posting page in the browser, then click Auto Apply.");
-  }
-
-  if (isAnyLlmUrl(pageUrl)) {
-    throw new Error("Switch to the job posting tab first, then click Auto Apply.");
-  }
-
-  const hasAccess = await chrome.permissions.contains({
-    origins: ["https://*/*", "http://*/*"],
-  });
-
-  if (!hasAccess) {
-    throw new Error(
-      "Page access not granted. Click Auto Apply again and allow permission."
-    );
-  }
-
-  const name = structured.contact?.name?.trim() || "Resume";
-  const role = position.trim() || inferJobRole(jobDescription || "");
-  const filename = buildResumeDownloadFilename(name, role);
-  const pdfBase64 = await encodeResumePdfBase64(structured);
-  const applicant = resumeToLlmShape(structured);
-  const job = {
-    companyName: companyName.trim(),
-    position: role,
-    jobUrl: jobUrl.trim() || pageUrl,
-    jobDescription: jobDescription.trim().slice(0, 8000),
-  };
-
-  const settings = await loadSettings();
-  /** @type {Record<string, unknown> | null} */
-  let lastResult = null;
-  let previousSummary = "";
-  /** @type {string[]} */
-  const summaries = [];
-
-  for (let round = 0; round < AUTO_APPLY_MAX_ROUNDS; round += 1) {
-    const snapshot = await captureJobPageSnapshot(jobTabId, applicant);
-
-    if (settings.hybridAutoApply) {
-      const hybridSteps = getHybridAutoApplySteps(pageUrl, snapshot);
-      if (hybridSteps.length) {
-        lastResult = await executeJobPageActions(jobTabId, hybridSteps, {
-          pdfBase64,
-          filename,
-          autoAdvance: true,
-        });
-        if (lastResult.submitted) {
-          return {
-            ok: true,
-            summary: "Application submitted via platform autofill.",
-            rounds: round + 1,
-            submitted: true,
-            summaries: ["Hybrid autofill completed the flow."],
+  if (/greenhouse\.io/i.test(url)) {
+    try {
+      const response = await fetch(url, { credentials: "omit" });
+      if (response.ok) {
+        const html = await response.text();
+        const greenhouse = parseGreenhouseRemixJob(html);
+        if (greenhouse) {
+          if (greenhouse.descriptionText.length > finalText.length) {
+            finalText = greenhouse.descriptionText.slice(0, 15000);
+          }
+          meta = {
+            ...(meta || {}),
+            companyName: greenhouse.companyName || meta?.companyName || "",
+            position: greenhouse.position || meta?.position || "",
+            applyUrl: meta?.applyUrl || url,
+            location: meta?.location || "",
+            jobPosted: greenhouse.jobPosted || meta?.jobPosted || "",
+            jobCreated: greenhouse.jobCreated || meta?.jobCreated || "",
+            jobModified: greenhouse.jobModified || meta?.jobModified || "",
           };
         }
-        await sleep(1200);
       }
+    } catch {
+      // Fall back to injected DOM scrape.
     }
-
-    const prompt = buildAutoApplyPrompt({
-      snapshot,
-      applicant,
-      job,
-      round,
-      previousSummary,
-      lastResult,
-    });
-
-    const responseText = await runAutoApplyChatGPTPrompt(prompt, jobWindowId);
-    const plan = parseAutoApplyResponse(responseText);
-    summaries.push(plan.summary);
-    previousSummary = plan.summary;
-
-    if (plan.status === "blocked") {
-      throw new Error(plan.blocker || plan.summary || "Auto apply blocked on this page.");
-    }
-
-    lastResult = await executeJobPageActions(jobTabId, plan.steps, {
-      pdfBase64,
-      filename,
-      autoAdvance: true,
-    });
-
-    if (plan.status === "done" || lastResult.submitted) {
-      return {
-        ok: true,
-        summary: plan.summary,
-        rounds: round + 1,
-        submitted: true,
-        summaries,
-      };
-    }
-
-    if (!lastResult.ok && lastResult.errors?.length) {
-      throw new Error(lastResult.errors[0]);
-    }
-
-    const tab = await chrome.tabs.get(jobTabId).catch(() => null);
-    const isSmartRecruiters = tab?.url?.includes("smartrecruiters.com");
-    const isOneClickUi = tab?.url?.includes("/oneclick-ui/");
-    await sleep(isOneClickUi ? 4500 : isSmartRecruiters ? 3500 : 2200);
   }
 
-  throw new Error(
-    "Auto apply did not finish within the step limit. Continue manually on the job page."
-  );
-}
-
-async function captureJobPageSnapshot(tabId, applicant = null) {
-  await ensureJobPageAutomation(tabId);
-
-  const tabMeta = await chrome.tabs.get(tabId).catch(() => null);
-  const isOneClickUi = tabMeta?.url?.includes("/oneclick-ui/");
-
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: async () => window.__cApplyPrepareApplySurface?.(),
-  });
-
-  await sleep(isOneClickUi ? 4000 : 2500);
-  await waitForTabLoad(tabId).catch(() => {});
-  await sleep(isOneClickUi ? 1500 : 1000);
-
-  if (applicant) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: (profile) => window.__cApplyLocalAutofillFromProfile?.(profile),
-      args: [applicant],
-    });
-    await sleep(500);
-  }
-
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: () => window.__cApplyCapturePageSnapshot?.(),
-  });
-
-  if (!result?.elements?.length) {
-    throw new Error(
-      "Could not scan the job page for form fields. Click \"I'm interested\" to open the form, then try Auto Apply again."
-    );
-  }
-
-  return result;
-}
-
-async function executeJobPageActions(tabId, steps, uploadPayload) {
-  await ensureJobPageAutomation(tabId);
-
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: async (actionSteps, upload) =>
-      window.__cApplyExecuteAutoApplyActions?.(actionSteps, upload),
-    args: [steps, uploadPayload],
-  });
-
-  return (
-    result || {
-      ok: false,
-      completed: [],
-      errors: ["Auto-apply actions did not run."],
-      submitted: false,
-    }
-  );
-}
-
-async function ensureJobPageAutomation(tabId) {
-  const [{ result: ready }] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    func: () =>
-      typeof window.__cApplyCapturePageSnapshot === "function" &&
-      typeof window.__cApplyExecuteAutoApplyActions === "function",
-  });
-
-  if (ready) return;
-
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    world: "MAIN",
-    files: ["content/job-apply-automation.js"],
-  });
-
-  await sleep(400);
-}
-
-async function runAutoApplyChatGPTPrompt(prompt, jobWindowId) {
-  const tab = await findOrOpenLlmTab(CHATGPT_PROVIDER, jobWindowId);
-
-  await ensureTabAwake(tab.id);
-  await waitForTabLoad(tab.id);
-  await ensureLlmReady(tab.id, CHATGPT_PROVIDER);
-  await prepareBackgroundLlmTab(tab.id);
-  await ensurePageApi(tab.id, CHATGPT_PROVIDER);
-  await waitForLlmReady(tab.id, CHATGPT_PROVIDER);
-
-  return runAutoApplyPromptWithPolling(tab.id, prompt, CHATGPT_PROVIDER);
-}
-
-function pickAutoApplyCaptureText(capture) {
-  const stream = capture.streamText || "";
-  const dom = capture.domText || "";
-  const hasNew = Boolean(capture.hasNewAssistant);
-  const inFlight = Boolean(capture.generating || capture.streamStarted);
-
-  if (!hasNew && !inFlight) {
-    if (hasAutoApplyMarkers(dom) && dom.length > 40) return dom;
-    if (hasAutoApplyMarkers(stream) && stream.length > 40) return stream;
-    return "";
-  }
-
-  if (inFlight && !hasNew) return stream;
-  if (dom.includes('"steps"') && dom.length > 80) return dom;
-  if (!stream) return dom;
-  if (!dom) return stream;
-  return dom.length > stream.length ? dom : stream;
-}
-
-async function runAutoApplyPromptWithPolling(tabId, prompt, provider = CHATGPT_PROVIDER) {
-  await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
-
-  const stopKeepalive = startBackgroundKeepalive();
-
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      world: "MAIN",
-      func: () => window.__cApplyStartKeepalive?.(),
-    });
-
-    const sendResult = await injectAndSend(tabId, prompt, CHATGPT_MODEL_HIGH, provider);
-    if (!sendResult?.ok || !sendResult.sent) {
-      throw new Error(sendResult?.error || provider.sendError);
-    }
-
-    const assistantCountBefore = sendResult.assistantCountBefore ?? 0;
-
-    const startedDeadline = Date.now() + 20000;
-    while (Date.now() < startedDeadline) {
-      const capture = await pollCapture(tabId, assistantCountBefore);
-      if (
-        capture.streamStarted ||
-        capture.generating ||
-        capture.hasNewAssistant ||
-        capture.streamText
-      ) {
-        break;
+  const mergedMeta = meta
+    ? {
+        ...meta,
+        ...formatJobDates(
+          mergeJobDates(meta, extractDatesFromText(finalText))
+        ),
       }
-      await sleep(500);
-    }
+    : null;
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const text = await waitForAutoApplyResponse(tabId, assistantCountBefore);
-      if (text) return text;
-      await sleep(1000);
-    }
-
-    throw new Error("ChatGPT did not return an auto-apply JSON plan.");
-  } finally {
-    stopKeepalive();
-    await chrome.scripting
-      .executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: () => window.__cApplyStopKeepalive?.(),
-      })
-      .catch(() => {});
-    await chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
-  }
-}
-
-async function waitForAutoApplyResponse(tabId, assistantCountBefore) {
-  const deadline = Date.now() + 180000;
-  let lastText = "";
-  let stableRounds = 0;
-
-  while (Date.now() < deadline) {
-    const capture = await pollCapture(tabId, assistantCountBefore);
-    const candidate = pickAutoApplyCaptureText(capture);
-
-    if (
-      capture.streamError &&
-      !candidate &&
-      !isRecoverableStreamCaptureError(capture.streamError)
-    ) {
-      throw new Error(capture.streamError);
-    }
-
-    if (!candidate || !hasAutoApplyMarkers(candidate) || candidate.length <= 40) {
-      stableRounds = 0;
-      lastText = candidate || "";
-      await sleep(500);
-      continue;
-    }
-
-    if (candidate === lastText) {
-      stableRounds += 1;
-    } else {
-      stableRounds = 0;
-      lastText = candidate;
-    }
-
-    const ready =
-      stableRounds >= (autoApplyResponseLooksComplete(candidate) ? 1 : 2) &&
-      isUsableAutoApplyResponse(candidate);
-
-    if (ready && (!capture.generating || autoApplyResponseLooksComplete(candidate))) {
-      return candidate;
-    }
-
-    await sleep(500);
-  }
-
-  const finalCapture = await pollCapture(tabId, assistantCountBefore);
-  const final = pickAutoApplyCaptureText(finalCapture) || lastText?.trim() || "";
-  return isUsableAutoApplyResponse(final) ? final : "";
+  return { ok: true, text: finalText, meta: mergedMeta, pageUrl: url };
 }
 
 async function handleTailorResume(payload) {
@@ -793,9 +468,8 @@ function pickTailorCaptureText(capture) {
   const hasNew = Boolean(capture.hasNewAssistant);
   const inFlight = Boolean(capture.generating || capture.streamStarted);
 
+  // Never reuse prior conversation JSON while waiting for a new re-tailor response.
   if (!hasNew && !inFlight) {
-    if (hasTailorResumeMarkers(dom) && dom.length > 80) return dom;
-    if (hasTailorResumeMarkers(stream) && stream.length > 80) return stream;
     return "";
   }
 
@@ -832,8 +506,6 @@ function pickRestructureCaptureText(capture) {
   const inFlight = Boolean(capture.generating || capture.streamStarted);
 
   if (!hasNew && !inFlight) {
-    if (hasRestructureJobMarkers(dom) && dom.length > 50) return dom;
-    if (hasRestructureJobMarkers(stream) && stream.length > 50) return stream;
     return "";
   }
 
@@ -907,6 +579,12 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, prov
       }
       continue;
     }
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplyResetStreamCapture?.(),
+    });
 
     const [{ result: sendResult }] = await chrome.scripting.executeScript({
       target: { tabId },
@@ -1164,6 +842,10 @@ async function waitForCapturedResponse(
       throw new Error(capture.streamError);
     }
 
+    const responseStarted = Boolean(
+      capture.hasNewAssistant || capture.generating || capture.streamStarted
+    );
+
     if (
       !candidate ||
       !profile.hasMarkers(candidate) ||
@@ -1171,6 +853,13 @@ async function waitForCapturedResponse(
     ) {
       stableRounds = 0;
       lastText = candidate || "";
+      await sleep(500);
+      continue;
+    }
+
+    if (!responseStarted) {
+      stableRounds = 0;
+      lastText = "";
       await sleep(500);
       continue;
     }
