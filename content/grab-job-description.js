@@ -358,6 +358,97 @@
     };
   }
 
+  function looksLikeJobTitle(text) {
+    const value = String(text || "").trim();
+    if (!value) return false;
+    if (value.length > 90) return true;
+    return /\b(?:senior|staff|principal|lead|junior|sr\.?|head of)\b|[(/]|(?:engineer|developer|designer|manager|analyst|architect|consultant|specialist|director|intern|coordinator|scientist|administrator|technician|associate|representative|executive|recruiter)s?\b/i.test(
+      value
+    );
+  }
+
+  function parsePageTitle(title) {
+    const cleaned = String(title || "").trim();
+    const match = cleaned.match(/^(.+?)\s*[-–|]\s*(.+)$/);
+    if (!match) return { companyName: "", position: "" };
+
+    const partA = match[1].trim();
+    const partB = match[2].replace(/\s*\|.*$/, "").trim();
+    const aLooksLikeRole = looksLikeJobTitle(partA);
+    const bLooksLikeRole = looksLikeJobTitle(partB);
+
+    if (aLooksLikeRole && !bLooksLikeRole) {
+      return { position: partA, companyName: partB };
+    }
+    if (bLooksLikeRole && !aLooksLikeRole) {
+      return { position: partB, companyName: partA };
+    }
+
+    return { position: partA, companyName: partB };
+  }
+
+  function formatCompanySlug(slug) {
+    return String(slug || "")
+      .replace(/[-_]+/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase())
+      .trim();
+  }
+
+  function companyFromLeverUrl(url) {
+    try {
+      const match = new URL(url).pathname.match(/^\/([^/]+)/);
+      return match ? formatCompanySlug(match[1]) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function normalizeExtractedMeta(meta, pageUrl, pageText, pageTitle) {
+    let companyName = String(meta.companyName || "").trim();
+    let position = String(meta.position || "").trim();
+
+    if (
+      companyName &&
+      position &&
+      looksLikeJobTitle(companyName) &&
+      !looksLikeJobTitle(position)
+    ) {
+      [companyName, position] = [position, companyName];
+    }
+
+    if (hostOf(pageUrl).includes("lever.co")) {
+      if (!companyName) companyName = companyFromLeverUrl(pageUrl);
+      if (!position) {
+        const firstLine = pageText
+          .split(/\n+/)
+          .map((line) => line.trim())
+          .find(Boolean);
+        if (firstLine && looksLikeJobTitle(firstLine)) position = firstLine;
+      }
+    }
+
+    if ((!position || !companyName) && pageTitle) {
+      const fromTitle = parsePageTitle(pageTitle);
+      if (!position && fromTitle.position) position = fromTitle.position;
+      if (!companyName && fromTitle.companyName) companyName = fromTitle.companyName;
+    }
+
+    if (
+      companyName &&
+      position &&
+      looksLikeJobTitle(companyName) &&
+      !looksLikeJobTitle(position)
+    ) {
+      [companyName, position] = [position, companyName];
+    }
+
+    return {
+      ...meta,
+      companyName: companyName.slice(0, 80),
+      position: position.slice(0, 80),
+    };
+  }
+
   function extractMeta(pageText, pageUrl) {
     const lines = pageText
       .split(/\n+/)
@@ -370,10 +461,24 @@
     let applyUrl = pageUrl;
     const host = hostOf(pageUrl);
 
-    const titleMatch = document.title.match(/^(.+?)\s*[-–|]\s*(.+)$/);
-    if (titleMatch) {
-      position = titleMatch[1].trim();
-      companyName = titleMatch[2].replace(/\|.*$/, "").trim();
+    if (host.includes("lever.co")) {
+      const leverTitle = document.querySelector(
+        ".posting-headline, [data-qa='posting-name'], .posting-title, .posting h2, h2"
+      );
+      if (leverTitle?.textContent?.trim()) {
+        position = leverTitle.textContent.trim();
+      }
+
+      const logoAlt = document
+        .querySelector(".main-header-logo img, .logo img, header img")
+        ?.getAttribute("alt");
+      if (logoAlt?.trim()) {
+        companyName = logoAlt.trim();
+      }
+
+      if (!companyName) {
+        companyName = companyFromLeverUrl(pageUrl);
+      }
     }
 
     const ghApplicationTitle = document.title.match(
@@ -402,8 +507,8 @@
         const ghTitle = document.querySelector(".app-title, h1");
         if (ghTitle?.textContent?.trim()) position = ghTitle.textContent.trim();
       }
-    } else {
-      const ghCompany = document.querySelector(".company-name, [class*='company']");
+    } else if (!host.includes("lever.co")) {
+      const ghCompany = document.querySelector(".company-name, [class*='company-name']");
       if (ghCompany?.textContent?.trim()) companyName = ghCompany.textContent.trim();
       const ghTitle = document.querySelector(".app-title, h1");
       if (ghTitle?.textContent?.trim()) position = ghTitle.textContent.trim();
@@ -427,17 +532,28 @@
     const ogSite = document.querySelector('meta[property="og:site_name"]')?.getAttribute("content");
     if (!companyName && ogSite) companyName = ogSite.trim();
 
+    if (!position || !companyName) {
+      const fromTitle = parsePageTitle(document.title);
+      if (!position && fromTitle.position) position = fromTitle.position;
+      if (!companyName && fromTitle.companyName) companyName = fromTitle.companyName;
+    }
+
     const dates = extractJobDates(pageText, host);
 
-    return {
-      companyName: (companyName || "").slice(0, 80),
-      position: (position || "").slice(0, 80),
-      location: (location || "").slice(0, 80),
-      applyUrl: applyUrl || pageUrl,
-      jobPosted: dates.jobPosted,
-      jobCreated: dates.jobCreated,
-      jobModified: dates.jobModified,
-    };
+    return normalizeExtractedMeta(
+      {
+        companyName: (companyName || "").slice(0, 80),
+        position: (position || "").slice(0, 80),
+        location: (location || "").slice(0, 80),
+        applyUrl: applyUrl || pageUrl,
+        jobPosted: dates.jobPosted,
+        jobCreated: dates.jobCreated,
+        jobModified: dates.jobModified,
+      },
+      pageUrl,
+      pageText,
+      document.title
+    );
   }
 
   window.__cApplyGrabbedMeta = extractMeta(window.__cApplyGrabbedText, location.href);

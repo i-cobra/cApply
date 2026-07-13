@@ -24,9 +24,51 @@ import {
   mergeJobDates,
 } from "./lib/job-date-extract.js";
 import { parseGreenhouseRemixJob } from "./lib/greenhouse-remix.js";
+import { normalizeGrabMeta } from "./lib/job-page-meta.js";
 import "./lib/jspdf/jspdf.umd.min.js";
 
 const CHATGPT_PROVIDER = LLM_PROVIDERS.chatgpt;
+
+/** @type {{ cancelled: boolean } | null} */
+let activeTailorRun = null;
+
+function beginTailorRun() {
+  if (activeTailorRun) {
+    activeTailorRun.cancelled = true;
+  }
+  activeTailorRun = { cancelled: false };
+  return activeTailorRun;
+}
+
+function cancelActiveTailorRun() {
+  if (activeTailorRun) {
+    activeTailorRun.cancelled = true;
+  }
+}
+
+/**
+ * @param {{ cancelled: boolean } | null | undefined} run
+ */
+function throwIfTailorCancelled(run) {
+  if (run?.cancelled) {
+    throw new Error("Tailoring cancelled.");
+  }
+}
+
+/**
+ * @param {number} ms
+ * @param {{ cancelled: boolean } | null | undefined} run
+ */
+async function sleepUnlessTailorCancelled(ms, run) {
+  const step = 200;
+  let remaining = ms;
+  while (remaining > 0) {
+    throwIfTailorCancelled(run);
+    const wait = Math.min(step, remaining);
+    await sleep(wait);
+    remaining -= wait;
+  }
+}
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
@@ -55,6 +97,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleTailorResume(message.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === "STOP_TAILOR") {
+    cancelActiveTailorRun();
+    sendResponse({ ok: true });
     return true;
   }
 
@@ -245,55 +293,73 @@ async function handleGrabPageText() {
   }
 
   const mergedMeta = meta
-    ? {
-        ...meta,
-        ...formatJobDates(
-          mergeJobDates(meta, extractDatesFromText(finalText))
-        ),
-      }
+    ? normalizeGrabMeta(
+        {
+          ...meta,
+          ...formatJobDates(
+            mergeJobDates(meta, extractDatesFromText(finalText))
+          ),
+        },
+        url,
+        finalText
+      )
     : null;
 
   return { ok: true, text: finalText, meta: mergedMeta, pageUrl: url };
 }
 
 async function handleTailorResume(payload) {
-  const { jobDescription, options, autoSend, jobWindowId } = payload;
+  const run = beginTailorRun();
 
-  if (!jobDescription?.trim()) {
-    throw new Error("Job description is empty.");
-  }
+  try {
+    const { jobDescription, options, autoSend, jobWindowId } = payload;
 
-  const settings = await loadSettings();
-  const prompt = buildTailorPrompt({
-    jobDescription,
-    options: {
-      ...options,
-      extraInstructions: mergePromptInstructions(
-        settings.promptModifyTailor,
-        options?.extraInstructions
-      ),
-    },
-  });
+    if (!jobDescription?.trim()) {
+      throw new Error("Job description is empty.");
+    }
 
-  if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
-    const responseText = await callOpenAiChat({
-      apiKey: settings.openAiApiKey,
-      model: settings.openAiModel,
-      prompt,
-      reasoningEffort: getChatGptModelConfig(CHATGPT_MODEL_HIGH).reasoningEffort,
+    throwIfTailorCancelled(run);
+
+    const settings = await loadSettings();
+    throwIfTailorCancelled(run);
+
+    const prompt = buildTailorPrompt({
+      jobDescription,
+      options: {
+        ...options,
+        extraInstructions: mergePromptInstructions(
+          settings.promptModifyTailor,
+          options?.extraInstructions
+        ),
+      },
     });
-    return { ok: true, sent: true, responseText, source: "openai-api" };
-  }
 
-  const provider = getLlmProvider(settings);
-  return runLlmPrompt(
-    prompt,
-    autoSend ?? settings.autoSend,
-    jobWindowId,
-    buildTailorResponseProfile(provider),
-    CHATGPT_MODEL_HIGH,
-    provider
-  );
+    if (settings.useOpenAiApi && settings.openAiApiKey?.trim()) {
+      const responseText = await callOpenAiChat({
+        apiKey: settings.openAiApiKey,
+        model: settings.openAiModel,
+        prompt,
+        reasoningEffort: getChatGptModelConfig(CHATGPT_MODEL_HIGH).reasoningEffort,
+      });
+      throwIfTailorCancelled(run);
+      return { ok: true, sent: true, responseText, source: "openai-api" };
+    }
+
+    const provider = getLlmProvider(settings);
+    return runLlmPrompt(
+      prompt,
+      autoSend ?? settings.autoSend,
+      jobWindowId,
+      buildTailorResponseProfile(provider),
+      CHATGPT_MODEL_HIGH,
+      provider,
+      run
+    );
+  } finally {
+    if (activeTailorRun === run) {
+      activeTailorRun = null;
+    }
+  }
 }
 
 async function handleFillProfile(payload) {
@@ -374,25 +440,42 @@ async function runLlmPrompt(
   explicitJobWindowId,
   profile,
   modelTier = CHATGPT_MODEL_HIGH,
-  provider = CHATGPT_PROVIDER
+  provider = CHATGPT_PROVIDER,
+  tailorRun = null
 ) {
+  throwIfTailorCancelled(tailorRun);
+
   const jobWindowId =
     explicitJobWindowId ?? (await getJobTabContext()).jobWindowId;
   const tab = await findOrOpenLlmTab(provider, jobWindowId);
 
+  throwIfTailorCancelled(tailorRun);
+
   await ensureTabAwake(tab.id);
   await waitForTabLoad(tab.id);
+  throwIfTailorCancelled(tailorRun);
   await ensureLlmReady(tab.id, provider);
   await prepareBackgroundLlmTab(tab.id);
   await ensurePageApi(tab.id, provider);
   await waitForLlmReady(tab.id, provider);
+
+  throwIfTailorCancelled(tailorRun);
 
   if (!autoSend) {
     await runInjectOnly(tab.id, prompt, modelTier, provider);
     return { ok: true, tabId: tab.id, sent: false, responseText: "", provider: provider.id };
   }
 
-  const responseText = await runPromptWithPolling(tab.id, prompt, profile, modelTier, provider);
+  const responseText = await runPromptWithPolling(
+    tab.id,
+    prompt,
+    profile,
+    modelTier,
+    provider,
+    tailorRun
+  );
+
+  throwIfTailorCancelled(tailorRun);
 
   return {
     ok: true,
@@ -547,12 +630,19 @@ async function prepareChatGptModel(tabId, modelTier, provider = CHATGPT_PROVIDER
 
 async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, provider = CHATGPT_PROVIDER) {
   await prepareChatGptModel(tabId, modelTier, provider);
+  await prepareBackgroundLlmTab(tabId);
+
+  if (provider.id === "claude") {
+    return injectAndSendClaude(tabId, prompt, provider);
+  }
 
   await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
     func: () => window.__cApplyResetStreamCapture?.(),
   });
+
+  const fillSettleMs = 900;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const [{ result: fillResult }] = await chrome.scripting.executeScript({
@@ -570,9 +660,9 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, prov
       continue;
     }
 
-    await sleep(attempt === 0 ? 900 : 1200);
+    await sleep(attempt === 0 ? fillSettleMs : 1200);
 
-    const ready = await waitForComposerReady(tabId, 4000);
+    const ready = await waitForComposerReady(tabId, 4000, provider);
     if (!ready.ready) {
       if (attempt === 1) {
         return { ok: false, error: ready.error || provider.composerReadyError };
@@ -604,17 +694,105 @@ async function injectAndSend(tabId, prompt, modelTier = CHATGPT_MODEL_HIGH, prov
   return { ok: false, error: provider.sendError };
 }
 
-async function waitForComposerReady(tabId, maxMs = 4000) {
+async function injectAndSendClaude(tabId, prompt, provider) {
+  const maxAttempts = 3;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplyResetStreamCapture?.(),
+    });
+
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: async (text) => {
+        if (typeof window.__cApplyRunInjectAsync === "function") {
+          return window.__cApplyRunInjectAsync(text, true);
+        }
+        return window.__cApplyRunInjectSync?.(text, true);
+      },
+      args: [prompt],
+    });
+
+    if (result?.ok && result.sent) {
+      return result;
+    }
+
+    if (result?.error && attempt === maxAttempts - 1) {
+      return { ok: false, error: result.error };
+    }
+
+    const [{ result: fillResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: (text) => window.__cApplyRunInjectSync?.(text, false),
+      args: [prompt],
+    });
+
+    if (!fillResult?.ok) {
+      if (attempt === maxAttempts - 1) {
+        return fillResult || { ok: false, error: provider.composerFillError };
+      }
+      await sleep(1200);
+      continue;
+    }
+
+    await sleep(attempt === 0 ? 1200 : 1800);
+
+    const ready = await waitForComposerReady(tabId, 10_000, provider);
+    if (!ready.ready && attempt === maxAttempts - 1) {
+      return { ok: false, error: ready.error || provider.composerReadyError };
+    }
+
+    if (!ready.ready) {
+      await sleep(800);
+      continue;
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => window.__cApplyResetStreamCapture?.(),
+    });
+
+    const [{ result: sendResult }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: async () => {
+        if (typeof window.__cApplySubmitComposerAsync === "function") {
+          return window.__cApplySubmitComposerAsync();
+        }
+        return window.__cApplySubmitComposer?.();
+      },
+    });
+
+    if (sendResult?.ok && sendResult.sent) {
+      return sendResult;
+    }
+
+    if (attempt === maxAttempts - 1) {
+      return sendResult || { ok: false, error: provider.sendError };
+    }
+  }
+
+  return { ok: false, error: provider.sendError };
+}
+
+async function waitForComposerReady(tabId, maxMs = 4000, provider = CHATGPT_PROVIDER) {
+  const minLength = provider.id === "claude" ? 8 : 20;
   const deadline = Date.now() + maxMs;
 
   while (Date.now() < deadline) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
-      func: () =>
+      func: (min) =>
         typeof window.__cApplyComposerReady === "function"
-          ? window.__cApplyComposerReady(20)
+          ? window.__cApplyComposerReady(min)
           : { ready: true },
+      args: [minLength],
     });
 
     if (result?.ready) return result;
@@ -624,13 +802,19 @@ async function waitForComposerReady(tabId, maxMs = 4000) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    func: () =>
+    func: (min) =>
       typeof window.__cApplyComposerReady === "function"
-        ? window.__cApplyComposerReady(20)
+        ? window.__cApplyComposerReady(min)
         : { ready: false, error: "Composer check unavailable." },
+    args: [minLength],
   });
 
-  return result || { ready: false, error: "ChatGPT composer did not accept the prompt." };
+  return (
+    result || {
+      ready: false,
+      error: provider.composerReadyError || "Composer did not accept the prompt.",
+    }
+  );
 }
 
 async function pollCapture(tabId, assistantCountBefore = 0) {
@@ -669,13 +853,16 @@ async function runPromptWithPolling(
   prompt,
   profile,
   modelTier = CHATGPT_MODEL_HIGH,
-  provider = CHATGPT_PROVIDER
+  provider = CHATGPT_PROVIDER,
+  tailorRun = null
 ) {
   await chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {});
 
   const stopKeepalive = startBackgroundKeepalive();
 
   try {
+    throwIfTailorCancelled(tailorRun);
+
     await chrome.scripting.executeScript({
       target: { tabId },
       world: "MAIN",
@@ -683,6 +870,7 @@ async function runPromptWithPolling(
     });
 
     const sendResult = await injectAndSend(tabId, prompt, modelTier, provider);
+    throwIfTailorCancelled(tailorRun);
     if (!sendResult?.ok || !sendResult.sent) {
       throw new Error(sendResult?.error || provider.sendError);
     }
@@ -691,6 +879,7 @@ async function runPromptWithPolling(
 
     const startedDeadline = Date.now() + 20000;
     while (Date.now() < startedDeadline) {
+      throwIfTailorCancelled(tailorRun);
       const capture = await pollCapture(tabId, assistantCountBefore);
       if (
         capture.streamStarted ||
@@ -700,14 +889,20 @@ async function runPromptWithPolling(
       ) {
         break;
       }
-      await sleep(500);
+      await sleepUnlessTailorCancelled(500, tailorRun);
     }
 
     const lastError = profile.emptyError;
     for (let attempt = 0; attempt < 3; attempt++) {
-      const text = await waitForCapturedResponse(tabId, assistantCountBefore, profile);
+      throwIfTailorCancelled(tailorRun);
+      const text = await waitForCapturedResponse(
+        tabId,
+        assistantCountBefore,
+        profile,
+        tailorRun
+      );
       if (text) return text;
-      await sleep(1000);
+      await sleepUnlessTailorCancelled(1000, tailorRun);
     }
 
     throw new Error(lastError);
@@ -824,13 +1019,15 @@ function startBackgroundKeepalive() {
 async function waitForCapturedResponse(
   tabId,
   assistantCountBefore,
-  profile
+  profile,
+  tailorRun = null
 ) {
   const deadline = Date.now() + 310000;
   let lastText = "";
   let stableRounds = 0;
 
   while (Date.now() < deadline) {
+    throwIfTailorCancelled(tailorRun);
     const capture = await pollCapture(tabId, assistantCountBefore);
     const candidate = profile.pickCaptureText(capture);
 
@@ -853,14 +1050,14 @@ async function waitForCapturedResponse(
     ) {
       stableRounds = 0;
       lastText = candidate || "";
-      await sleep(500);
+      await sleepUnlessTailorCancelled(500, tailorRun);
       continue;
     }
 
     if (!responseStarted) {
       stableRounds = 0;
       lastText = "";
-      await sleep(500);
+      await sleepUnlessTailorCancelled(500, tailorRun);
       continue;
     }
 
@@ -879,8 +1076,10 @@ async function waitForCapturedResponse(
       return candidate;
     }
 
-    await sleep(500);
+    await sleepUnlessTailorCancelled(500, tailorRun);
   }
+
+  throwIfTailorCancelled(tailorRun);
 
   const finalCapture = await pollCapture(tabId, assistantCountBefore);
   const final = profile.pickCaptureText(finalCapture) || lastText?.trim() || "";
@@ -1006,6 +1205,8 @@ async function prepareBackgroundLlmTab(tabId) {
           configurable: true,
           get: () => "visible",
         });
+        document.hasFocus = () => true;
+        document.dispatchEvent(new Event("visibilitychange"));
       } catch {
         // ignore
       }

@@ -17,9 +17,13 @@
   ];
 
   const SEND_SELECTORS = [
+    'button[data-testid="send-button"]',
     'button[aria-label="Send message"]',
     'button[aria-label="Send Message"]',
-    'button[data-testid="send-button"]',
+    'button[aria-label*="Send message" i]',
+    'button[aria-label*="Send" i]',
+    '[role="button"][aria-label*="Send message" i]',
+    '[role="button"][aria-label*="Send" i]',
     'button[type="submit"]',
   ];
 
@@ -105,6 +109,7 @@
         configurable: true,
         get: () => "visible",
       });
+      document.hasFocus = () => true;
       document.dispatchEvent(new Event("visibilitychange"));
     } catch {
       // ignore
@@ -123,26 +128,110 @@
 
   function findEditor() {
     spoofPageVisibility();
+    /** @type {HTMLElement[]} */
+    const candidates = [];
+
     for (const sel of EDITOR_SELECTORS) {
       const nodes = document.querySelectorAll(sel);
       for (const el of nodes) {
         if (!isUsableElement(el)) continue;
-        if (el.tagName === "TEXTAREA") return el;
-        if (el.isContentEditable || el.getAttribute("contenteditable") !== "false") {
-          return el;
+        if (el.tagName === "TEXTAREA") {
+          candidates.push(el);
+          continue;
         }
+        if (el.isContentEditable || el.getAttribute("contenteditable") !== "false") {
+          candidates.push(el);
+        }
+      }
+    }
+
+    if (!candidates.length) return null;
+
+    const seen = new Set();
+    const unique = candidates.filter((el) => {
+      if (seen.has(el)) return false;
+      seen.add(el);
+      return true;
+    });
+
+    for (const el of unique) {
+      const container = el.closest(
+        'form, fieldset, footer, [data-testid="composer"], [class*="composer"]'
+      );
+      if (findSendButtonInScope(container)) return el;
+    }
+
+    return unique.sort((a, b) => {
+      const topA = a.getBoundingClientRect().top;
+      const topB = b.getBoundingClientRect().top;
+      return topB - topA;
+    })[0];
+  }
+
+  function isSendEnabled(btn) {
+    if (!btn) return false;
+    if (btn.disabled) return false;
+    if (btn.getAttribute("aria-disabled") === "true") return false;
+    return true;
+  }
+
+  /**
+   * @param {Element | null | undefined} scope
+   * @param {{ allowDisabled?: boolean }} [options]
+   */
+  function findSendButtonInScope(scope, options = {}) {
+    const { allowDisabled = false } = options;
+    if (!scope) return null;
+
+    for (const sel of SEND_SELECTORS) {
+      const nodes = scope.querySelectorAll(sel);
+      for (const btn of nodes) {
+        if (!allowDisabled && !isSendEnabled(btn)) continue;
+        if (isUsableElement(btn)) return btn;
       }
     }
     return null;
   }
 
-  function findSendButton() {
+  /**
+   * @param {Element | null | undefined} editor
+   * @param {{ allowDisabled?: boolean }} [options]
+   */
+  function findSendButtonNearEditor(editor, options = {}) {
+    if (!editor) return null;
+
+    const container = editor.closest(
+      'form, fieldset, footer, [data-testid="composer"], [class*="composer"]'
+    );
+    const near = findSendButtonInScope(container, options);
+    if (near) return near;
+
+    /** @type {Element | null} */
+    let sibling = editor.parentElement;
+    for (let depth = 0; sibling && depth < 6; depth += 1) {
+      const btn = findSendButtonInScope(sibling, options);
+      if (btn) return btn;
+      sibling = sibling.parentElement;
+    }
+
+    return null;
+  }
+
+  /**
+   * @param {{ allowDisabled?: boolean, editor?: Element | null }} [options]
+   */
+  function findSendButton(options = {}) {
+    const { allowDisabled = false, editor = null } = options;
     spoofPageVisibility();
+
+    const near = findSendButtonNearEditor(editor || findEditor(), { allowDisabled });
+    if (near) return near;
+
     for (const sel of SEND_SELECTORS) {
       const nodes = document.querySelectorAll(sel);
       for (const btn of nodes) {
-        if (btn.disabled) continue;
-        if (isPresent(btn)) return btn;
+        if (!allowDisabled && !isSendEnabled(btn)) continue;
+        if (isUsableElement(btn)) return btn;
       }
     }
     return null;
@@ -168,7 +257,74 @@
     editor.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  function fillViaInputData(editor, text) {
+    try {
+      editor.focus({ preventScroll: true });
+    } catch {
+      // ignore
+    }
+
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const before = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      inputType: "insertText",
+      data: text,
+    });
+    editor.dispatchEvent(before);
+
+    const input = new InputEvent("input", {
+      bubbles: true,
+      inputType: "insertText",
+      data: text,
+    });
+    editor.dispatchEvent(input);
+  }
+
+  function recordInjectResult(editor, expectedLength) {
+    const textLength = getEditorText(editor).length;
+    const fillOk = textLength >= 8 || expectedLength >= 8;
+    window.__cApplyLastInject = {
+      length: textLength,
+      expected: expectedLength,
+      ok: fillOk,
+      at: Date.now(),
+    };
+    return { textLength, fillOk };
+  }
+
+  function fillViaTiptap(editor, text) {
+    /** @type {{ chain?: () => { focus: () => { clearContent: () => { insertContent: (value: string) => { run: () => boolean } } } } } | null} */
+    const tiptap = editor?.editor || null;
+    if (!tiptap?.chain) return false;
+
+    try {
+      tiptap.chain().focus().clearContent().insertContent(text).run();
+      return getEditorText(editor).length >= Math.min(text.length, 32);
+    } catch {
+      return false;
+    }
+  }
+
   function fillContentEditable(editor, text) {
+    try {
+      if (fillViaTiptap(editor, text)) return;
+    } catch {
+      // fallback below
+    }
+
+    try {
+      fillViaInputData(editor, text);
+      if (getEditorText(editor).length >= Math.min(text.length, 32)) return;
+    } catch {
+      // fallback below
+    }
+
     try {
       editor.focus({ preventScroll: true });
     } catch {
@@ -191,6 +347,21 @@
       // fallback below
     }
 
+    try {
+      const data = new DataTransfer();
+      data.setData("text/plain", text);
+      editor.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: data,
+        })
+      );
+      if (getEditorText(editor).length >= Math.min(text.length, 32)) return;
+    } catch {
+      // fallback below
+    }
+
     editor.innerHTML = "";
     for (const line of text.split("\n")) {
       const p = document.createElement("p");
@@ -198,8 +369,23 @@
       editor.appendChild(p);
     }
     editor.dispatchEvent(
+      new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        inputType: "insertFromPaste",
+      })
+    );
+    editor.dispatchEvent(
       new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" })
     );
+    editor.dispatchEvent(new Event("change", { bubbles: true }));
+
+    if (getEditorText(editor).length < Math.min(text.length, 32) && text.length) {
+      editor.textContent = text;
+      editor.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertFromPaste" })
+      );
+    }
   }
 
   function fillEditor(editor, text) {
@@ -211,12 +397,72 @@
   }
 
   function clickSend(sendBtn) {
-    sendBtn.click();
+    spoofPageVisibility();
+    try {
+      sendBtn.scrollIntoView({ block: "nearest", inline: "nearest" });
+    } catch {
+      // ignore
+    }
+    try {
+      sendBtn.focus({ preventScroll: true });
+    } catch {
+      // ignore
+    }
+
+    try {
+      sendBtn.click();
+      return;
+    } catch {
+      // fallback below
+    }
+
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      sendBtn.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
+      );
+    }
+  }
+
+  function submitViaKeyboard(editor) {
+    try {
+      editor.focus({ preventScroll: true });
+    } catch {
+      // ignore
+    }
+
+    /** @type {KeyboardEventInit[]} */
+    const combos = [
+      { key: "Enter", code: "Enter", keyCode: 13, which: 13 },
+      { key: "Enter", code: "Enter", keyCode: 13, which: 13, ctrlKey: true },
+      { key: "Enter", code: "Enter", keyCode: 13, which: 13, metaKey: true },
+    ];
+
+    for (const init of combos) {
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        })
+      );
+      editor.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        })
+      );
+    }
+
+    return { ok: true, method: "keyboard" };
   }
 
   function submitComposer(editor) {
-    const sendBtn = findSendButton();
-    if (sendBtn) {
+    const sendBtn =
+      findSendButtonNearEditor(editor) ||
+      findSendButton({ editor, allowDisabled: true });
+
+    if (sendBtn && isSendEnabled(sendBtn)) {
       clickSend(sendBtn);
       return { ok: true, method: "button" };
     }
@@ -227,17 +473,37 @@
       return { ok: true, method: "form" };
     }
 
-    editor.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: "Enter",
-        code: "Enter",
-        keyCode: 13,
-        which: 13,
-        bubbles: true,
-        cancelable: true,
-      })
-    );
-    return { ok: false, method: "enter" };
+    return submitViaKeyboard(editor);
+  }
+
+  function waitForSendButtonEnabled(editor, maxMs = 3500) {
+    const deadline = Date.now() + maxMs;
+    return new Promise((resolve) => {
+      const tick = () => {
+        const sendBtn = findSendButtonNearEditor(editor) || findSendButton({ editor });
+        if (sendBtn && isSendEnabled(sendBtn)) {
+          resolve(sendBtn);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          resolve(null);
+          return;
+        }
+        setTimeout(tick, 80);
+      };
+      tick();
+    });
+  }
+
+  async function submitComposerAsync(editor) {
+    const sendBtn = await waitForSendButtonEnabled(editor);
+    if (sendBtn) {
+      clickSend(sendBtn);
+      return { ok: true, method: "button", sent: true };
+    }
+
+    const fallback = submitComposer(editor);
+    return { ...fallback, sent: Boolean(fallback.ok) };
   }
 
   window.__cApplyComposerReady = function (minLength = 20) {
@@ -248,12 +514,20 @@
     }
 
     const textLength = getEditorText(editor).length;
-    const sendBtn = findSendButton();
+    const sendBtn = findSendButtonNearEditor(editor, { allowDisabled: true });
+    const lastInject = window.__cApplyLastInject;
+    const recentInject =
+      lastInject?.ok &&
+      lastInject.expected >= minLength &&
+      Date.now() - (lastInject.at || 0) < 60_000;
 
     return {
-      ready: textLength >= minLength && Boolean(sendBtn),
+      ready:
+        (textLength >= minLength || recentInject) &&
+        (Boolean(sendBtn) || Boolean(editor.closest("form")) || recentInject),
       textLength,
       hasSend: Boolean(sendBtn),
+      fillOk: Boolean(recentInject),
     };
   };
 
@@ -313,10 +587,14 @@
   }
 
   function isClaudeCompletionUrl(url) {
+    const normalized = String(url || "");
     return (
-      url.includes("/completion") ||
-      url.includes("/chat_conversations") ||
-      url.includes("/append_message")
+      normalized.includes("/completion") ||
+      normalized.includes("/chat_conversations") ||
+      normalized.includes("/append_message") ||
+      normalized.includes("/api/messages") ||
+      normalized.includes("/api/chat") ||
+      /chat_conversations\/[^/?]+\/completion/.test(normalized)
     );
   }
 
@@ -402,9 +680,14 @@
             ? args[0].url
             : String(args[0]);
 
+      const method = String(
+        args[1]?.method || (args[0] instanceof Request ? args[0].method : "GET")
+      ).toUpperCase();
+
       const response = await originalFetch(...args);
 
       if (
+        method === "POST" &&
         response.ok &&
         isClaudeStreamResponse(response) &&
         isClaudeCompletionUrl(url)
@@ -437,6 +720,34 @@
       }
 
       return response;
+    };
+
+    const xhrOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__cApplyClaudeUrl = String(url);
+      this.__cApplyClaudeMethod = String(method || "GET").toUpperCase();
+      return xhrOpen.call(this, method, url, ...rest);
+    };
+
+    const xhrSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (...args) {
+      const url = this.__cApplyClaudeUrl || "";
+      const method = this.__cApplyClaudeMethod || "GET";
+      if (method === "POST" && isClaudeCompletionUrl(url)) {
+        const generation = window.__cApplyStreamCapture?.generation ?? streamCaptureGeneration;
+        window.__cApplyStreamCapture.started = true;
+        this.addEventListener("load", () => {
+          try {
+            const text = String(this.responseText || "").trim();
+            if (text) {
+              markStreamCaptureDone(text, null, generation);
+            }
+          } catch {
+            // ignore
+          }
+        });
+      }
+      return xhrSend.apply(this, args);
     };
   }
 
@@ -582,11 +893,33 @@
       const assistantCountBefore = countAssistantMessages();
       const submitted = submitComposer(editor);
 
-      if (!submitted.ok && !findSendButton()) {
+      if (!submitted.ok && !findSendButton({ editor, allowDisabled: true })) {
         return { ok: false, error: "Send button not found." };
       }
 
       return { ok: true, sent: true, assistantCountBefore };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  };
+
+  window.__cApplySubmitComposerAsync = async function () {
+    try {
+      spoofPageVisibility();
+
+      const editor = findEditor();
+      if (!editor) {
+        return { ok: false, error: "Composer not found on page." };
+      }
+
+      const assistantCountBefore = countAssistantMessages();
+      const submitted = await submitComposerAsync(editor);
+
+      if (!submitted.ok && !findSendButton({ editor, allowDisabled: true })) {
+        return { ok: false, error: "Send button not found." };
+      }
+
+      return { ok: true, sent: true, assistantCountBefore, method: submitted.method };
     } catch (err) {
       return { ok: false, error: err.message || String(err) };
     }
@@ -603,15 +936,16 @@
       }
 
       fillEditor(editor, prompt);
+      const { textLength, fillOk } = recordInjectResult(editor, prompt.length);
 
       if (!autoSend) {
-        return { ok: true, sent: false };
+        return { ok: true, sent: false, textLength, fillOk };
       }
 
       const assistantCountBefore = countAssistantMessages();
       const submitted = submitComposer(editor);
 
-      if (!submitted.ok && !findSendButton()) {
+      if (!submitted.ok && !findSendButton({ editor, allowDisabled: true })) {
         return { ok: false, error: "Send button not found. Open a Claude chat first." };
       }
 
@@ -619,6 +953,41 @@
         ok: true,
         sent: true,
         assistantCountBefore,
+      };
+    } catch (err) {
+      return { ok: false, error: err.message || String(err) };
+    }
+  };
+
+  window.__cApplyRunInjectAsync = async function (prompt, autoSend) {
+    try {
+      spoofPageVisibility();
+      if (autoSend) resetStreamCapture();
+
+      const editor = findEditor();
+      if (!editor) {
+        return { ok: false, error: "Composer not found on page." };
+      }
+
+      fillEditor(editor, prompt);
+      const { textLength, fillOk } = recordInjectResult(editor, prompt.length);
+
+      if (!autoSend) {
+        return { ok: true, sent: false, textLength, fillOk };
+      }
+
+      const assistantCountBefore = countAssistantMessages();
+      const submitted = await submitComposerAsync(editor);
+
+      if (!submitted.ok && !findSendButton({ editor, allowDisabled: true })) {
+        return { ok: false, error: "Send button not found. Open a Claude chat first." };
+      }
+
+      return {
+        ok: true,
+        sent: true,
+        assistantCountBefore,
+        method: submitted.method,
       };
     } catch (err) {
       return { ok: false, error: err.message || String(err) };

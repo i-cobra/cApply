@@ -310,3 +310,46 @@ test("formatJobDateDisplay formats ISO dates", () => {
   assert.match(formatted, /2024/);
   assert.match(formatted, /Mar|March/i);
 });
+
+test("formatRelativeHistoryDate prefers relative labels for recent entries", async () => {
+  const { formatRelativeHistoryDate } = await import("../lib/tailor-history.js");
+  const now = new Date();
+  const twoMinutesAgo = new Date(now.getTime() - 2 * 60_000).toISOString();
+  const todayEarlier = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+    9,
+    41
+  ).toISOString();
+
+  assert.match(formatRelativeHistoryDate(twoMinutesAgo), /min ago/);
+  assert.match(formatRelativeHistoryDate(todayEarlier), /^Today,/);
+});
+
+test("parsePageTitle handles company-first Lever titles", async () => {
+  const { parsePageTitle, normalizeGrabMeta } = await import("../lib/job-page-meta.js");
+  const parsed = parsePageTitle(
+    "Aera Technology - Senior Software Engineer (CALC engine) (copy)"
+  );
+  assert.equal(parsed.companyName, "Aera Technology");
+  assert.equal(parsed.position, "Senior Software Engineer (CALC engine) (copy)");
+
+  const fixed = normalizeGrabMeta(
+    {
+      companyName: "Senior Software Engineer (CALC engine) (copy)",
+      position: "Aera Technology",
+    },
+    "https://jobs.lever.co/aeratechnology/76a9171c-6d56-4229-bc16-236e3b",
+    "Senior Software Engineer (CALC engine) (copy)\nAera Technology is a pioneer..."
+  );
+  assert.equal(fixed.companyName, "Aera Technology");
+  assert.match(fixed.position, /Senior Software Engineer/i);
+});
+
+test("parsePageTitle keeps job-first Indeed-style titles", async () => {
+  const { parsePageTitle } = await import("../lib/job-page-meta.js");
+  const parsed = parsePageTitle("Senior Software Engineer - Acme Inc");
+  assert.equal(parsed.position, "Senior Software Engineer");
+  assert.equal(parsed.companyName, "Acme Inc");
+});

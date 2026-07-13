@@ -225,6 +225,24 @@ export function createResumeEditor(container, options = {}) {
     return btn;
   }
 
+  let renderFrame = 0;
+
+  function scheduleRenderStructured() {
+    if (renderFrame) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = 0;
+      renderStructured();
+    });
+  }
+
+  function renderStructuredNow() {
+    if (renderFrame) {
+      cancelAnimationFrame(renderFrame);
+      renderFrame = 0;
+    }
+    renderStructured();
+  }
+
   function renderStructured() {
     els.structured.innerHTML = "";
 
@@ -457,12 +475,20 @@ export function createResumeEditor(container, options = {}) {
   return {
     setText(text, options = {}) {
       data = parseResumeText(text);
-      renderStructured();
+      if (options.immediate) {
+        renderStructuredNow();
+      } else {
+        scheduleRenderStructured();
+      }
       if (!options.silent) notifyChange();
     },
     setStructured(structured, options = {}) {
       data = normalizeResume(structured);
-      renderStructured();
+      if (options.immediate) {
+        renderStructuredNow();
+      } else {
+        scheduleRenderStructured();
+      }
       if (!options.silent) notifyChange();
     },
     getText() {

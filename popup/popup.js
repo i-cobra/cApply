@@ -5,10 +5,11 @@ import { emptyResume, normalizeResume, parseResumeText, serializeResume } from "
 import {
   addTailorHistoryEntry,
   clearTailorHistory,
+  computeHistoryStats,
   exportHistoryCsv,
   formatHistoryDate,
+  formatRelativeHistoryDate,
   getEntryStatus,
-  getHistoryStats,
   inferJobRole,
   loadTailorHistory,
   normalizeJobRoleTitle,
@@ -113,6 +114,7 @@ const els = {
   atsResumeSource: document.getElementById("atsResumeSource"),
   historyList: document.getElementById("historyList"),
   historyEmpty: document.getElementById("historyEmpty"),
+  historyLoader: document.getElementById("historyLoader"),
   historySearch: document.getElementById("historySearch"),
   historyCompanySearch: document.getElementById("historyCompanySearch"),
   historyPositionSearch: document.getElementById("historyPositionSearch"),
@@ -179,6 +181,14 @@ const SCROLL_TOP_THRESHOLD = 120;
 
 /** @type {import("../lib/tailor-history.js").JobStatus} */
 let activeJobsTab = "saved";
+
+/** @type {import("../lib/tailor-history.js").TailorHistoryEntry[] | null} */
+let historyCache = null;
+/** @type {Promise<import("../lib/tailor-history.js").TailorHistoryEntry[]> | null} */
+let historyCachePromise = null;
+let historyHasRenderedOnce = false;
+let historyRenderToken = 0;
+let historySearchDebounce = 0;
 
 const JOBS_EMPTY_MESSAGES = {
   saved: "No saved jobs yet. Tailor a resume on the Application tab.",
@@ -447,12 +457,23 @@ init();
 async function refreshCloudData() {
   try {
     await forceRefreshSession();
-    await syncUserDataFromCloud();
+    const syncResult = await syncUserDataFromCloud();
+    if (syncResult.profileChanged) {
+      await loadProfileResume();
+    }
+    if (syncResult.historyChanged) {
+      invalidateHistoryCache();
+      if (getCurrentMainTab() === "history") {
+        scheduleHistoryRender({ force: true, showLoader: false });
+      }
+    }
   } catch (err) {
     console.warn("Failed to sync data from Supabase", err);
   }
-  await loadProfileResume();
-  await renderHistory();
+}
+
+function scheduleCloudDataRefresh() {
+  void refreshCloudData();
 }
 
 async function init() {
@@ -460,14 +481,14 @@ async function init() {
   currentAuthUser = await requireAuth();
   showAppShell();
   updateAccountUi();
+  wireAppListeners();
 
-  await refreshCloudData();
-  appSettings = await loadSettings();
+  const [settings, tab] = await Promise.all([loadSettings(), getActiveBrowserTab()]);
+  appSettings = settings;
   applySettingsToForm(appSettings);
   updateProviderUi();
   updateCoverLetterVisibility();
 
-  const tab = await getActiveBrowserTab();
   if (tab) {
     activeBrowserTabId = tab.tabId;
     activeJobContextKey = getJobContextKey(tab.url, tab.tabId);
@@ -477,15 +498,22 @@ async function init() {
 
   await migrateLegacyApplicationState(activeJobContextKey);
   applyApplicationState(await loadJobContext(activeJobContextKey));
+  updateApplicationActionButton();
 
+  void loadProfileResume();
+  scheduleCloudDataRefresh();
+  void maybeShowOnboarding();
+}
+
+function wireAppListeners() {
   els.mainTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveTab(tab.dataset.tab));
   });
 
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
-      getActiveBrowserTab().then((tab) => {
-        if (tab) activeBrowserTabId = tab.tabId;
+      getActiveBrowserTab().then((activeTab) => {
+        if (activeTab) activeBrowserTabId = activeTab.tabId;
       });
       persistJobContext();
     }
@@ -511,8 +539,23 @@ async function init() {
   els.settingsDefaultOutput?.addEventListener("change", updateCoverLetterVisibility);
   els.clearHistory.addEventListener("click", onClearHistory);
   els.historyList.addEventListener("click", onHistoryListClick);
-  els.historyCompanySearch.addEventListener("input", () => renderHistory());
-  els.historyPositionSearch.addEventListener("input", () => renderHistory());
+  els.historyList.addEventListener(
+    "toggle",
+    (event) => {
+      const target = /** @type {HTMLDetailsElement | null} */ (event.target);
+      if (!target?.classList?.contains("history-overflow") || !target.open) return;
+      els.historyList.querySelectorAll(".history-overflow[open]").forEach((menu) => {
+        if (menu !== target) menu.open = false;
+      });
+    },
+    true
+  );
+  els.historyCompanySearch.addEventListener("input", () =>
+    scheduleHistoryRender({ debounceMs: 150, showLoader: false })
+  );
+  els.historyPositionSearch.addEventListener("input", () =>
+    scheduleHistoryRender({ debounceMs: 150, showLoader: false })
+  );
   els.jobsTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveJobsTab(tab.dataset.jobsTab));
   });
@@ -528,9 +571,6 @@ async function init() {
   els.onboardingSkipBtn.addEventListener("click", dismissOnboarding);
   els.onboardingNextBtn.addEventListener("click", advanceOnboarding);
   initScrollToTop();
-
-  updateApplicationActionButton();
-  await maybeShowOnboarding();
 }
 
 async function loadProfileResume() {
@@ -642,10 +682,21 @@ function applyApplicationState(state) {
   latestCoverLetter = state?.coverLetter ?? "";
   els.coverLetter.value = latestCoverLetter;
   updateCoverLetterVisibility();
+  updateJobDescriptionActions();
 
+  requestAnimationFrame(() => {
+    applyApplicationResumeState(state);
+  });
+}
+
+/**
+ * @param {import("../lib/job-context.js").JobContextState | null} state
+ */
+function applyApplicationResumeState(state) {
   if (state?.structured && hasResumeContent(normalizeResume(state.structured))) {
-    showTailoredResume(state.structured, latestTailorChanges, latestAtsFromAi);
-    updateAtsScore();
+    showTailoredResume(state.structured, latestTailorChanges, latestAtsFromAi, {
+      scrollIntoView: false,
+    });
     return;
   }
 
@@ -660,7 +711,6 @@ function applyApplicationState(state) {
 
   resetTailoredApplicationUi();
   updateAtsScore();
-  updateJobDescriptionActions();
 }
 
 function resetTailoredApplicationUi() {
@@ -687,10 +737,23 @@ function setTailorBtnLabel(text) {
 }
 
 function getTailorActionLabel() {
-  if (tailorInProgress) return "Tailoring…";
+  if (tailorInProgress) return "Stop tailoring";
   return hasTailoredResume()
     ? els.tailorBtn.dataset.retailorLabel || "Re-tailor"
     : els.tailorBtn.dataset.tailorLabel || "Tailor";
+}
+
+function isTailorCancelledError(message) {
+  return /tailoring cancelled/i.test(String(message || ""));
+}
+
+async function stopTailoring() {
+  setStatus("Stopping tailoring…");
+  try {
+    await chrome.runtime.sendMessage({ type: "STOP_TAILOR" });
+  } catch {
+    // Background may already be stopping.
+  }
 }
 
 function getApplicationFieldElements() {
@@ -771,7 +834,8 @@ function updateApplicationActionButton() {
 
   els.applicationActionsSecondary.hidden = !showSecondary;
   setTailorBtnLabel(getTailorActionLabel());
-  els.tailorBtn.disabled = tailorInProgress;
+  els.tailorBtn.disabled = false;
+  els.tailorBtn.title = tailorInProgress ? "Stop tailoring" : "";
   els.downloadResumeBtn.disabled = tailorInProgress;
   els.previewResumeBtn.disabled = tailorInProgress;
 
@@ -1060,14 +1124,16 @@ function setActiveTab(tabId) {
   });
 
   if (tabId === "application") {
-    updateAtsScore();
+    scheduleAtsScoreUpdate();
     updateCoverLetterVisibility();
   }
 
   updateScrollToTopVisibility();
 
   if (tabId === "history") {
-    renderHistory();
+    scheduleHistoryRender({
+      showLoader: !historyCache && !historyCachePromise && !historyHasRenderedOnce,
+    });
   }
 
   if (tabId === "analysis") {
@@ -1336,7 +1402,8 @@ function updateAtsScore() {
   els.atsScoreSection.hidden = tailorInProgress;
 }
 
-function showTailoredResume(structured, changes = [], atsScore) {
+function showTailoredResume(structured, changes = [], atsScore, options = {}) {
+  const { scrollIntoView = true } = options;
   const normalized = normalizeResume(structured);
   latestTailorChanges = changes;
   if (atsScore !== undefined) {
@@ -1349,7 +1416,7 @@ function showTailoredResume(structured, changes = [], atsScore) {
   }
   updateAtsScore();
   updateApplicationActionButton();
-  if (!tailorInProgress && hasTailoredResume()) {
+  if (scrollIntoView && !tailorInProgress && hasTailoredResume()) {
     els.atsScoreSection.scrollIntoView({ block: "nearest" });
   }
 }
@@ -1448,6 +1515,295 @@ function formatJobUrlHost(url) {
 }
 
 /**
+ * @param {string} url
+ */
+function formatJobSourceLabel(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+    const sources = [
+      ["indeed", "Indeed"],
+      ["linkedin", "LinkedIn"],
+      ["glassdoor", "Glassdoor"],
+      ["greenhouse", "Greenhouse"],
+      ["lever.co", "Lever"],
+      ["workday", "Workday"],
+      ["ziprecruiter", "ZipRecruiter"],
+      ["monster", "Monster"],
+    ];
+    for (const [needle, label] of sources) {
+      if (host.includes(needle)) return label;
+    }
+    const base = host.split(".")[0] || host;
+    return base.charAt(0).toUpperCase() + base.slice(1);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
+ */
+function parseHistoryCardDisplay(entry) {
+  let position = historyEntryPosition(entry);
+  let company = historyEntryCompanyName(entry);
+  let location = "";
+  let source = entry.jobUrl?.trim() ? formatJobSourceLabel(entry.jobUrl) : "";
+
+  // "San Francisco, CA 94102 - Indeed.com · Senior Software Engineer"
+  const locationRoleMatch = position.match(/^(.+?)\s*-\s*([^·]+?)\s*·\s*(.+)$/i);
+  if (locationRoleMatch) {
+    location = locationRoleMatch[1].trim();
+    position = locationRoleMatch[3].trim();
+    if (!source) {
+      const titleSource = locationRoleMatch[2].trim().replace(/\.(com|org|net|io)$/i, "");
+      if (titleSource) source = titleSource;
+    }
+  }
+
+  // Company derived from a scraped title can be the same noise, e.g.
+  // "San Francisco, CA 94102 - Indeed.com"
+  const companyNoiseMatch = company.match(/^(.+?)\s*-\s*(\S+\.(?:com|org|net|io))$/i);
+  if (companyNoiseMatch) {
+    if (!location) location = companyNoiseMatch[1].trim();
+    if (!source) source = companyNoiseMatch[2].replace(/\.(com|org|net|io)$/i, "");
+    company = "";
+  }
+
+  if (company && position.startsWith(`${company} · `)) {
+    position = position.slice(company.length + 3).trim();
+  } else if (!company && position.includes(" · ")) {
+    const parts = position.split(" · ").map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const head = parts[0];
+      if (!/indeed|linkedin|glassdoor|\.com/i.test(head)) {
+        company = head;
+        position = parts.slice(1).join(" · ");
+      }
+    }
+  }
+
+  if (!position) {
+    position = company || entry.title?.trim() || "Tailored application";
+  }
+
+  return { position, company, location, source };
+}
+
+/**
+ * @param {import("../lib/tailor-history.js").JobStatus} status
+ */
+function historyStatusLabel(status) {
+  const labels = {
+    saved: "Saved",
+    applied: "Applied",
+    interview: "Interview",
+    archived: "Archived",
+  };
+  return labels[status] || "Saved";
+}
+
+/**
+ * @param {string} location
+ */
+function formatHistoryLocation(location) {
+  return location.replace(/\s+\d{5}(-\d{4})?$/, "").trim();
+}
+
+/**
+ * @param {string} source
+ * @param {string} [url]
+ */
+function formatHistorySourceDisplay(source, url = "") {
+  if (url) {
+    try {
+      return new URL(url).hostname.replace(/^www\./i, "");
+    } catch {
+      // fall through
+    }
+  }
+  if (!source) return "";
+  const lower = source.toLowerCase();
+  if (/\.(com|org|net|io)$/.test(lower)) return lower;
+  return `${lower}.com`;
+}
+
+/**
+ * @param {string} name
+ * @param {string} [markup]
+ */
+function historyIcon(name, markup) {
+  const span = document.createElement("span");
+  span.className = `history-icon history-icon-${name}`;
+  span.setAttribute("aria-hidden", "true");
+  span.innerHTML = markup;
+  return span;
+}
+
+const HISTORY_ICON_MARKUP = {
+  pin: `<svg viewBox="0 0 20 20" fill="none"><path d="M10 17s-5-4.35-5-8.25a5 5 0 1 1 10 0C15 12.65 10 17 10 17Z" stroke="currentColor" stroke-width="1.6"/><circle cx="10" cy="8.75" r="1.6" fill="currentColor"/></svg>`,
+  clock: `<svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.6"/><path d="M10 6.5V10l2.5 2.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  check: `<svg viewBox="0 0 20 20" fill="none"><path d="M5 10.5 8.2 13.7 15 6.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  external: `<svg viewBox="0 0 20 20" fill="none"><path d="M11 4h5v5M16 4 9 11M8 6H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  document: `<svg viewBox="0 0 20 20" fill="none"><path d="M6 3.5h5.2L15 7.3V16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.6"/><path d="M11 3.5V8h4.5" stroke="currentColor" stroke-width="1.6"/></svg>`,
+  bookmark: `<svg viewBox="0 0 20 20" fill="none"><path d="M5 4.5a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1V16l-5-3-5 3V4.5Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
+  calendar: `<svg viewBox="0 0 20 20" fill="none"><rect x="4" y="5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.6"/><path d="M7 3.5v3M13 3.5v3M4 8.5h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+  archive: `<svg viewBox="0 0 20 20" fill="none"><rect x="4" y="4" width="12" height="3" rx="1" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 7v8.5a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V7" stroke="currentColor" stroke-width="1.6"/><path d="M8.5 10.5h3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`,
+};
+
+/**
+ * @param {import("../lib/tailor-history.js").JobStatus} status
+ * @param {string} label
+ */
+function createHistoryStatusChip(status, label) {
+  const chip = document.createElement("span");
+  chip.className = `history-chip history-chip-status history-chip-status--${status}`;
+
+  const iconName =
+    status === "applied"
+      ? "check"
+      : status === "interview"
+        ? "calendar"
+        : status === "archived"
+          ? "archive"
+          : "bookmark";
+  chip.append(historyIcon(iconName, HISTORY_ICON_MARKUP[iconName]));
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  chip.appendChild(text);
+  return chip;
+}
+
+/**
+ * @param {string} iso
+ */
+function createHistoryTimeChip(iso) {
+  const chip = document.createElement("time");
+  chip.className = "history-chip history-chip-time";
+  chip.dateTime = iso || "";
+  chip.title = formatHistoryDate(iso);
+  chip.append(historyIcon("clock", HISTORY_ICON_MARKUP.clock));
+
+  const text = document.createElement("span");
+  text.textContent = formatRelativeHistoryDate(iso);
+  chip.appendChild(text);
+  return chip;
+}
+
+/**
+ * @param {string} label
+ * @param {string} action
+ * @param {Record<string, string>} [dataset]
+ */
+function createHistoryOutlineButton(label, action, dataset = {}) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "history-outline-btn";
+  btn.dataset.action = action;
+
+  const iconName = action === "toggle-resume" ? "document" : "external";
+  btn.append(historyIcon(iconName, HISTORY_ICON_MARKUP[iconName]));
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  btn.appendChild(text);
+
+  for (const [key, value] of Object.entries(dataset)) {
+    btn.dataset[key] = value;
+  }
+  return btn;
+}
+
+/**
+ * @param {string} href
+ * @param {string} label
+ */
+function createHistoryPostingLink(href, label) {
+  const link = document.createElement("a");
+  link.className = "history-outline-btn history-outline-btn-link";
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.title = href;
+  link.append(historyIcon("external", HISTORY_ICON_MARKUP.external));
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  link.appendChild(text);
+  return link;
+}
+
+/**
+ * @param {number} score
+ */
+function createHistoryScoreRing(score) {
+  const tier = scoreTier(score);
+  const ring = document.createElement("div");
+  ring.className = `history-score-ring tier-${tier}`;
+  ring.style.setProperty("--score", String(score));
+  ring.title = `ATS match score: ${score}% — estimated keyword alignment with the job description when this resume was tailored.`;
+  ring.setAttribute("role", "img");
+  ring.setAttribute("aria-label", `ATS match score ${score} percent`);
+
+  const inner = document.createElement("div");
+  inner.className = "history-score-ring-inner";
+  inner.innerHTML = `<span class="history-score-value">${score}</span><span class="history-score-unit">%</span>`;
+  ring.appendChild(inner);
+  return ring;
+}
+
+/**
+ * @param {string} action
+ * @param {string} label
+ * @param {Record<string, string>} [dataset]
+ */
+function createHistoryMenuButton(action, label, dataset = {}) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "history-overflow-item";
+  btn.dataset.action = action;
+  btn.textContent = label;
+  for (const [key, value] of Object.entries(dataset)) {
+    btn.dataset[key] = value;
+  }
+  return btn;
+}
+
+/**
+ * @param {HTMLElement[]} menuButtons
+ */
+function createHistoryOverflowMenu(menuButtons) {
+  const overflow = document.createElement("details");
+  overflow.className = "history-overflow";
+
+  const trigger = document.createElement("summary");
+  trigger.className = "history-overflow-trigger";
+  trigger.setAttribute("aria-label", "More actions");
+  trigger.textContent = "⋯";
+
+  const menu = document.createElement("div");
+  menu.className = "history-overflow-menu";
+  menu.append(...menuButtons);
+
+  overflow.append(trigger, menu);
+  return overflow;
+}
+
+/**
+ * @param {boolean} isApplied
+ */
+function createHistoryAppliedButton(isApplied) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `history-mark-applied-btn${isApplied ? " is-applied" : ""}`;
+  btn.dataset.action = "toggle-applied";
+  btn.setAttribute("aria-pressed", String(isApplied));
+  btn.title = isApplied ? "Marked as applied" : "Mark as applied";
+  btn.textContent = isApplied ? "Applied" : "Mark applied";
+  return btn;
+}
+
+/**
  * @param {import("../lib/tailor-history.js").TailorHistoryEntry} entry
  * @param {string} companyQuery
  * @param {string} positionQuery
@@ -1491,229 +1847,297 @@ function setActiveJobsTab(tabId) {
     tab.setAttribute("aria-selected", String(isActive));
   });
 
-  renderHistory();
+  scheduleHistoryRender({ showLoader: false });
 }
 
-async function renderHistory() {
-  const history = await loadTailorHistory();
-  const stats = await getHistoryStats();
-  const companyQuery = els.historyCompanySearch.value.trim();
-  const positionQuery = els.historyPositionSearch.value.trim();
-  const filtered = history.filter(
-    (entry) =>
-      getEntryStatus(entry) === activeJobsTab &&
-      matchesHistorySearch(entry, companyQuery, positionQuery)
-  );
+function shouldShowHistoryLoader(showLoader) {
+  if (historyHasRenderedOnce) return false;
+  if (showLoader === true) return true;
+  if (showLoader === false) return false;
+  return !historyCache && !historyCachePromise;
+}
 
-  els.historyList.innerHTML = "";
+function invalidateHistoryCache() {
+  historyCache = null;
+  historyCachePromise = null;
+}
 
-  const hasHistory = history.length > 0;
-  const hasFilters = Boolean(companyQuery || positionQuery);
-  els.historySearch.hidden = !hasHistory;
-  els.clearHistory.hidden = !hasHistory;
-  els.exportHistoryBtn.hidden = !hasHistory;
+function hideHistoryLoader() {
+  if (!els.historyLoader) return;
+  els.historyLoader.hidden = true;
+  els.historyLoader.setAttribute("hidden", "");
+}
 
-  if (hasHistory) {
-    els.historyStats.hidden = false;
-    els.historyStats.innerHTML = [
-      `<span class="history-stat">${stats.total} total</span>`,
-      `<span class="history-stat">${stats.saved} saved</span>`,
-      `<span class="history-stat">${stats.applied} applied</span>`,
-      `<span class="history-stat">${stats.interview} interviews</span>`,
-      stats.avgScore != null
-        ? `<span class="history-stat">${stats.avgScore}% avg ATS</span>`
-        : "",
-    ]
-      .filter(Boolean)
-      .join("");
-  } else {
-    els.historyStats.hidden = true;
-    els.historyStats.innerHTML = "";
-  }
+function showHistoryLoader() {
+  if (historyHasRenderedOnce || !els.historyLoader) return;
+  els.historyLoader.hidden = false;
+  els.historyLoader.removeAttribute("hidden");
+}
 
-  if (!hasHistory) {
-    els.historyEmpty.textContent = JOBS_EMPTY_MESSAGES[activeJobsTab];
-    els.historyEmpty.hidden = false;
+function setHistoryLoading(loading) {
+  if (loading) {
+    showHistoryLoader();
+    if (!historyHasRenderedOnce) {
+      els.historyList.hidden = true;
+      els.historyEmpty.hidden = true;
+      els.historyStats.hidden = true;
+    }
     return;
   }
 
-  if (filtered.length === 0) {
-    els.historyEmpty.textContent = hasFilters
-      ? `No matching jobs in ${activeJobsTab}.`
-      : JOBS_EMPTY_MESSAGES[activeJobsTab];
-    els.historyEmpty.hidden = false;
+  hideHistoryLoader();
+  els.historyList.hidden = false;
+}
+
+/**
+ * @param {{ force?: boolean, showLoader?: boolean, debounceMs?: number }} [options]
+ */
+function scheduleHistoryRender(options = {}) {
+  const { force = false, showLoader, debounceMs = 0 } = options;
+
+  const run = () => {
+    requestAnimationFrame(() => {
+      renderHistory({ force, showLoader });
+    });
+  };
+
+  if (debounceMs > 0) {
+    clearTimeout(historySearchDebounce);
+    historySearchDebounce = window.setTimeout(run, debounceMs);
     return;
   }
 
-  els.historyEmpty.hidden = true;
+  clearTimeout(historySearchDebounce);
+  run();
+}
+
+/**
+ * @param {{ force?: boolean, showLoader?: boolean }} [options]
+ */
+async function getCachedHistory(options = {}) {
+  if (options.force) invalidateHistoryCache();
+  if (historyCache) return historyCache;
+  if (!historyCachePromise) {
+    historyCachePromise = loadTailorHistory().then((items) => {
+      historyCache = items;
+      return items;
+    });
+  }
+  return historyCachePromise;
+}
+
+async function renderHistory(options = {}) {
+  const token = ++historyRenderToken;
+  const { force = false, showLoader = false } = options;
+  const useLoader = shouldShowHistoryLoader(showLoader);
+
+  if (useLoader) setHistoryLoading(true);
+
+  try {
+    const history = await getCachedHistory({ force });
+    if (token !== historyRenderToken) return;
+
+    const stats = computeHistoryStats(history);
+    const companyQuery = els.historyCompanySearch.value.trim();
+    const positionQuery = els.historyPositionSearch.value.trim();
+    const filtered = history.filter(
+      (entry) =>
+        getEntryStatus(entry) === activeJobsTab &&
+        matchesHistorySearch(entry, companyQuery, positionQuery)
+    );
+
+    els.historyList.innerHTML = "";
+
+    const hasHistory = history.length > 0;
+    const hasFilters = Boolean(companyQuery || positionQuery);
+    els.historySearch.hidden = !hasHistory;
+    els.clearHistory.hidden = !hasHistory;
+    els.exportHistoryBtn.hidden = !hasHistory;
+
+    if (hasHistory) {
+      els.historyStats.hidden = false;
+      els.historyStats.innerHTML = [
+        `<span class="history-stat">${stats.total} total</span>`,
+        `<span class="history-stat">${stats.saved} saved</span>`,
+        `<span class="history-stat">${stats.applied} applied</span>`,
+        `<span class="history-stat">${stats.interview} interviews</span>`,
+        stats.avgScore != null
+          ? `<span class="history-stat">${stats.avgScore}% avg ATS</span>`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("");
+    } else {
+      els.historyStats.hidden = true;
+      els.historyStats.innerHTML = "";
+    }
+
+    if (!hasHistory) {
+      els.historyEmpty.textContent = JOBS_EMPTY_MESSAGES[activeJobsTab];
+      els.historyEmpty.hidden = false;
+      historyHasRenderedOnce = true;
+      hideHistoryLoader();
+      return;
+    }
+
+    if (filtered.length === 0) {
+      els.historyEmpty.textContent = hasFilters
+        ? `No matching jobs in ${activeJobsTab}.`
+        : JOBS_EMPTY_MESSAGES[activeJobsTab];
+      els.historyEmpty.hidden = false;
+      historyHasRenderedOnce = true;
+      hideHistoryLoader();
+      return;
+    }
+
+    els.historyEmpty.hidden = true;
+
+    const fragment = document.createDocumentFragment();
 
   for (const entry of filtered) {
+    const status = getEntryStatus(entry);
+    const display = parseHistoryCardDisplay(entry);
+
     const item = document.createElement("li");
-    item.className = "history-item";
+    item.className = `history-item history-item--${status}`;
     item.dataset.historyId = entry.id;
+    item.dataset.status = status;
 
     const body = document.createElement("div");
     body.className = "history-item-body";
 
-    const companyName = historyEntryCompanyName(entry);
+    const companyName = display.company || display.position;
     const logo = document.createElement("div");
     logo.className = "history-company-logo";
     logo.style.setProperty("--history-logo-hue", String(historyCompanyLogoHue(companyName)));
-    logo.textContent = historyCompanyInitial(companyName);
-    logo.title = companyName || "Unknown company";
+    logo.textContent = historyCompanyInitial(companyName || display.position);
+    logo.title = companyName || display.position || "Unknown company";
     logo.setAttribute("aria-hidden", "true");
 
     const content = document.createElement("div");
     content.className = "history-item-content";
 
     const header = document.createElement("div");
-    header.className = "history-item-header";
+    header.className = "history-card-header";
 
-    const date = document.createElement("span");
-    date.className = "history-date";
-    date.textContent = formatHistoryDate(entry.createdAt);
-    header.appendChild(date);
+    const headerMain = document.createElement("div");
+    headerMain.className = "history-header-main";
+
+    const jobTitle = document.createElement("h3");
+    jobTitle.className = "history-job-title";
+    jobTitle.textContent = display.position;
+    headerMain.appendChild(jobTitle);
+
+    const subtitleParts = [];
+    if (display.company) subtitleParts.push(display.company);
+    if (display.location) subtitleParts.push(formatHistoryLocation(display.location));
+    const sourceLabel = formatHistorySourceDisplay(display.source, entry.jobUrl?.trim() || "");
+    if (sourceLabel) subtitleParts.push(sourceLabel);
+
+    if (subtitleParts.length) {
+      const jobSubtitle = document.createElement("p");
+      jobSubtitle.className = "history-job-subtitle";
+      jobSubtitle.append(historyIcon("pin", HISTORY_ICON_MARKUP.pin));
+
+      const subtitleText = document.createElement("span");
+      subtitleText.textContent = subtitleParts.join(" · ");
+      jobSubtitle.appendChild(subtitleText);
+      headerMain.appendChild(jobSubtitle);
+    } else if (!entry.jobUrl?.trim()) {
+      const snippet = document.createElement("p");
+      snippet.className = "history-job-subtitle history-job-snippet";
+      snippet.textContent = entry.jobDescription.trim().replace(/\s+/g, " ").slice(0, 100);
+      headerMain.appendChild(snippet);
+    }
+
+    header.appendChild(headerMain);
 
     if (entry.atsScore?.score != null) {
-      const score = document.createElement("span");
-      score.className = `history-score tier-${scoreTier(entry.atsScore.score)}`;
-      score.textContent = `${entry.atsScore.score}%`;
-      header.appendChild(score);
+      header.appendChild(createHistoryScoreRing(entry.atsScore.score));
     }
+
+    const chipRow = document.createElement("div");
+    chipRow.className = "history-chip-row";
+    chipRow.appendChild(createHistoryStatusChip(status, historyStatusLabel(status)));
+    chipRow.appendChild(createHistoryTimeChip(entry.createdAt));
 
     if (entry.appliedAt) {
-      const appliedDate = document.createElement("span");
-      appliedDate.className = "history-date";
-      appliedDate.textContent = `Applied ${formatHistoryDate(entry.appliedAt)}`;
-      header.appendChild(appliedDate);
+      const appliedChip = document.createElement("span");
+      appliedChip.className = "history-chip history-chip-applied";
+      appliedChip.title = formatHistoryDate(entry.appliedAt);
+      appliedChip.append(historyIcon("check", HISTORY_ICON_MARKUP.check));
+      const appliedText = document.createElement("span");
+      appliedText.textContent = `Applied ${formatRelativeHistoryDate(entry.appliedAt)}`;
+      appliedChip.appendChild(appliedText);
+      chipRow.appendChild(appliedChip);
     }
 
-    const appliedToggle = document.createElement("button");
-    appliedToggle.type = "button";
-    const status = getEntryStatus(entry);
-    appliedToggle.className = `history-applied-toggle${status === "applied" ? " is-applied" : ""}`;
-    appliedToggle.dataset.action = "toggle-applied";
-    appliedToggle.setAttribute("aria-pressed", String(status === "applied"));
-    appliedToggle.textContent = status === "applied" ? "✓ Applied" : "Mark applied";
-    if (status !== "saved" && status !== "applied") {
-      appliedToggle.hidden = true;
-    }
-    header.appendChild(appliedToggle);
+    const divider = document.createElement("div");
+    divider.className = "history-card-divider";
+    divider.setAttribute("aria-hidden", "true");
 
-    const title = document.createElement("p");
-    title.className = "history-title";
-    const position = historyEntryPosition(entry);
-    const company = historyEntryCompanyName(entry);
+    const footer = document.createElement("div");
+    footer.className = "history-card-footer";
 
-    if (company && position) {
-      title.textContent = `${company} · ${position}`;
-    } else if (entry.title?.trim()) {
-      title.textContent = entry.title;
-      if (company && !entry.title.includes(company)) {
-        title.textContent = `${company} · ${entry.title}`;
-      }
-    } else {
-      title.textContent = position || company || "Tailored application";
-    }
+    const footerLeft = document.createElement("div");
+    footerLeft.className = "history-footer-left";
 
-    const preview = document.createElement("div");
-    preview.className = "history-preview";
     if (entry.jobUrl?.trim()) {
-      const jobUrl = entry.jobUrl.trim();
-      const link = document.createElement("a");
-      link.className = "history-job-link";
-      link.href = jobUrl;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.title = jobUrl;
-      link.textContent = "View job posting";
-
-      const host = document.createElement("span");
-      host.className = "history-job-link-host";
-      host.textContent = formatJobUrlHost(jobUrl);
-      link.appendChild(host);
-      preview.appendChild(link);
-    } else {
-      const snippet = document.createElement("p");
-      snippet.className = "history-preview-text";
-      snippet.textContent = entry.jobDescription
-        .trim()
-        .replace(/\s+/g, " ")
-        .slice(0, 140);
-      preview.appendChild(snippet);
+      footerLeft.appendChild(
+        createHistoryPostingLink(entry.jobUrl.trim(), "Job posting")
+      );
     }
 
-    const actions = document.createElement("div");
-    actions.className = "history-actions";
+    const resumeBtn = createHistoryOutlineButton("Resume", "toggle-resume");
+    footerLeft.appendChild(resumeBtn);
 
-    const editBtn = document.createElement("button");
-    editBtn.type = "button";
-    editBtn.className = "link-btn";
-    editBtn.dataset.action = "edit";
-    editBtn.textContent = "Edit";
-
-    const openBtn = document.createElement("button");
-    openBtn.type = "button";
-    openBtn.className = "link-btn";
-    openBtn.dataset.action = "open";
-    openBtn.textContent = "Open";
-    openBtn.title = "Open in Application";
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.type = "button";
-    deleteBtn.className = "link-btn";
-    deleteBtn.dataset.action = "delete";
-    deleteBtn.textContent = "Delete";
+    /** @type {HTMLElement[]} */
+    const overflowButtons = [
+      createHistoryMenuButton("open", "Open in Application"),
+      createHistoryMenuButton("edit", "Edit"),
+    ];
 
     if (status === "saved") {
-      const archiveBtn = document.createElement("button");
-      archiveBtn.type = "button";
-      archiveBtn.className = "link-btn";
-      archiveBtn.dataset.action = "set-status";
-      archiveBtn.dataset.status = "archived";
-      archiveBtn.textContent = "Archive";
-      actions.append(editBtn, openBtn, archiveBtn, deleteBtn);
+      overflowButtons.push(
+        createHistoryMenuButton("set-status", "Archive", { status: "archived" })
+      );
     } else if (status === "applied") {
-      const interviewBtn = document.createElement("button");
-      interviewBtn.type = "button";
-      interviewBtn.className = "link-btn";
-      interviewBtn.dataset.action = "set-status";
-      interviewBtn.dataset.status = "interview";
-      interviewBtn.textContent = "Interview";
-      const archiveBtn = document.createElement("button");
-      archiveBtn.type = "button";
-      archiveBtn.className = "link-btn";
-      archiveBtn.dataset.action = "set-status";
-      archiveBtn.dataset.status = "archived";
-      archiveBtn.textContent = "Archive";
-      actions.append(editBtn, openBtn, interviewBtn, archiveBtn, deleteBtn);
+      overflowButtons.push(
+        createHistoryMenuButton("set-status", "Move to interview", { status: "interview" }),
+        createHistoryMenuButton("set-status", "Archive", { status: "archived" })
+      );
     } else if (status === "interview") {
-      const archiveBtn = document.createElement("button");
-      archiveBtn.type = "button";
-      archiveBtn.className = "link-btn";
-      archiveBtn.dataset.action = "set-status";
-      archiveBtn.dataset.status = "archived";
-      archiveBtn.textContent = "Archive";
-      actions.append(editBtn, openBtn, archiveBtn, deleteBtn);
+      overflowButtons.push(
+        createHistoryMenuButton("set-status", "Archive", { status: "archived" })
+      );
     } else {
-      const restoreBtn = document.createElement("button");
-      restoreBtn.type = "button";
-      restoreBtn.className = "link-btn";
-      restoreBtn.dataset.action = "set-status";
-      restoreBtn.dataset.status = "saved";
-      restoreBtn.textContent = "Restore";
-      actions.append(editBtn, openBtn, restoreBtn, deleteBtn);
+      overflowButtons.push(
+        createHistoryMenuButton("set-status", "Restore", { status: "saved" })
+      );
     }
 
+    overflowButtons.push(createHistoryMenuButton("delete", "Delete"));
+    footerLeft.appendChild(createHistoryOverflowMenu(overflowButtons));
+
+    const footerRight = document.createElement("div");
+    footerRight.className = "history-footer-right";
+    if (status === "saved" || status === "applied") {
+      footerRight.appendChild(createHistoryAppliedButton(status === "applied"));
+    }
+
+    footer.append(footerLeft, footerRight);
+
     const details = document.createElement("details");
-    details.className = "history-details";
-    const summary = document.createElement("summary");
-    summary.textContent = "View tailored resume";
-    details.appendChild(summary);
+    details.className = "history-details history-details-panel";
 
     const resumeText = document.createElement("pre");
     resumeText.className = "history-resume-text";
-    resumeText.textContent = entry.resumeText || serializeResume(entry.structured);
+    details.addEventListener("toggle", () => {
+      resumeBtn.classList.toggle("is-active", details.open);
+      if (!details.open || resumeText.dataset.loaded) return;
+      resumeText.textContent = entry.resumeText || serializeResume(entry.structured);
+      resumeText.dataset.loaded = "1";
+    });
     details.appendChild(resumeText);
 
     if (entry.changes?.length) {
@@ -1741,10 +2165,20 @@ async function renderHistory() {
     });
     details.append(notesLabel, notesField);
 
-    content.append(header, title, preview, actions, details);
+    content.append(header, chipRow, divider, footer, details);
     body.append(logo, content);
     item.append(body);
-    els.historyList.appendChild(item);
+    fragment.appendChild(item);
+  }
+
+    els.historyList.appendChild(fragment);
+    historyHasRenderedOnce = true;
+    hideHistoryLoader();
+  } finally {
+    hideHistoryLoader();
+    if (token === historyRenderToken) {
+      els.historyList.hidden = false;
+    }
   }
 }
 
@@ -1756,6 +2190,16 @@ async function onHistoryListClick(event) {
   const id = item?.dataset.historyId;
   if (!id) return;
 
+  button.closest(".history-overflow")?.removeAttribute("open");
+
+  if (button.dataset.action === "toggle-resume") {
+    const details = item?.querySelector(".history-details-panel");
+    if (details instanceof HTMLDetailsElement) {
+      details.open = !details.open;
+    }
+    return;
+  }
+
   if (button.dataset.action === "edit" || button.dataset.action === "open") {
     const history = await loadTailorHistory();
     const entry = history.find((record) => record.id === id);
@@ -1765,6 +2209,7 @@ async function onHistoryListClick(event) {
 
   if (button.dataset.action === "toggle-applied") {
     await setTailorHistoryApplied(id);
+    invalidateHistoryCache();
     await renderHistory();
     return;
   }
@@ -1776,6 +2221,7 @@ async function onHistoryListClick(event) {
         id,
         /** @type {import("../lib/tailor-history.js").JobStatus} */ (status)
       );
+      invalidateHistoryCache();
       await renderHistory();
     }
     return;
@@ -1783,6 +2229,7 @@ async function onHistoryListClick(event) {
 
   if (button.dataset.action === "delete") {
     await removeTailorHistoryEntry(id);
+    invalidateHistoryCache();
     await renderHistory();
     return;
   }
@@ -1790,6 +2237,7 @@ async function onHistoryListClick(event) {
 
 async function onClearHistory() {
   await clearTailorHistory();
+  invalidateHistoryCache();
   await renderHistory();
 }
 
@@ -1817,6 +2265,7 @@ async function recordTailorHistory({
     atsScore,
     coverLetter,
   });
+  invalidateHistoryCache();
   await renderHistory();
 }
 
@@ -2126,15 +2575,17 @@ function setTailorBusy(busy) {
     els.applicationActionsSecondary.hidden = true;
     els.tailoredResumeSection.hidden = true;
     els.atsScoreSection.hidden = true;
-    els.tailorBtn.disabled = true;
+    els.tailorBtn.disabled = false;
+    els.tailorBtn.title = "Stop tailoring";
     els.downloadResumeBtn.disabled = true;
     els.previewResumeBtn.disabled = true;
     els.tailorBtn.classList.add("busy");
     els.tailorBtn.setAttribute("aria-busy", "true");
-    setTailorBtnLabel("Tailoring…");
+    setTailorBtnLabel("Stop tailoring");
     return;
   }
 
+  els.tailorBtn.title = "";
   if (hasTailoredResume()) {
     els.tailoredResumeSection.hidden = false;
   }
@@ -2145,6 +2596,11 @@ function setTailorBusy(busy) {
 }
 
 async function onTailor() {
+  if (tailorInProgress) {
+    await stopTailoring();
+    return;
+  }
+
   const resume = serializeResume(profileEditor.getStructured());
   const jobDescription = els.jobDescription.value.trim();
 
@@ -2207,7 +2663,13 @@ async function onTailor() {
       );
     }
 
-    if (!response?.ok) throw new Error(response?.error || "Something went wrong");
+    if (!response?.ok) {
+      if (isTailorCancelledError(response?.error)) {
+        setStatus("Tailoring stopped.", "success");
+        return;
+      }
+      throw new Error(response?.error || "Something went wrong");
+    }
 
     if (response.responseText?.trim()) {
       const baseResume = profileEditor.getStructured();
@@ -2268,7 +2730,11 @@ async function onTailor() {
       );
     }
   } catch (err) {
-    setStatus(err.message, "error");
+    if (isTailorCancelledError(err.message)) {
+      setStatus("Tailoring stopped.", "success");
+    } else {
+      setStatus(err.message, "error");
+    }
   } finally {
     tailorInProgress = false;
     tailorSession = null;
