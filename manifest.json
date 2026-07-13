@@ -8,7 +8,8 @@
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://qwvtdsmbnngiblaaogyw.supabase.co/*"
   ],
   "side_panel": {
     "default_path": "popup/popup.html"

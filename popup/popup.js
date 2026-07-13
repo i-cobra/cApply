@@ -38,6 +38,14 @@ import {
   ensureTailoredResumeCoverage,
 } from "../lib/job-core-skills.js";
 import { createResumeEditor } from "./resume-editor.js";
+import {
+  forceRefreshSession,
+  getSession,
+  signIn,
+  signOut,
+  signUp,
+} from "../lib/supabase-auth.js";
+import { syncProfileToCloud, syncUserDataFromCloud } from "../lib/supabase-data.js";
 
 const PROFILE_KEY = "capply_profile_resume";
 const PROFILE_STRUCTURED_KEY = "capply_profile_resume_structured";
@@ -111,6 +119,8 @@ const els = {
   clearHistory: document.getElementById("clearHistory"),
   jobsTabs: document.querySelectorAll(".jobs-tab"),
   settingsBtn: document.getElementById("settingsBtn"),
+  userBtn: document.getElementById("userBtn"),
+  userAvatarInitials: document.getElementById("userAvatarInitials"),
   coverLetterSection: document.getElementById("coverLetterSection"),
   coverLetter: document.getElementById("coverLetter"),
   copyCoverLetterBtn: document.getElementById("copyCoverLetterBtn"),
@@ -152,6 +162,17 @@ const els = {
   onboardingSkipBtn: document.getElementById("onboardingSkipBtn"),
   onboardingNextBtn: document.getElementById("onboardingNextBtn"),
   scrollToTopBtn: document.getElementById("scrollToTopBtn"),
+  authOverlay: document.getElementById("authOverlay"),
+  appShell: document.getElementById("appShell"),
+  authForm: document.getElementById("authForm"),
+  authEmail: document.getElementById("authEmail"),
+  authPassword: document.getElementById("authPassword"),
+  authSubmitBtn: document.getElementById("authSubmitBtn"),
+  authToggleMode: document.getElementById("authToggleMode"),
+  authStatus: document.getElementById("authStatus"),
+  authSubtitle: document.getElementById("authSubtitle"),
+  signOutBtn: document.getElementById("signOutBtn"),
+  settingsAccountEmail: document.getElementById("settingsAccountEmail"),
 };
 
 const SCROLL_TOP_THRESHOLD = 120;
@@ -212,6 +233,18 @@ let onboardingStepIndex = 0;
 /** @type {import("../lib/settings.js").AppSettings | null} */
 let appSettings = null;
 
+/** @type {boolean} */
+let authSignUpMode = false;
+
+/** @type {boolean} */
+let authBusy = false;
+
+/** @type {((user: Record<string, unknown>) => void) | null} */
+let authReadyResolve = null;
+
+/** @type {Record<string, unknown> | null} */
+let currentAuthUser = null;
+
 /**
  * Browser tab + storage key captured when tailoring starts so tab switches
  * during ChatGPT do not wipe the form or save results to the wrong tab.
@@ -261,10 +294,174 @@ function sendBackgroundMessage(message, timeoutMs = TAILOR_TIMEOUT_MS) {
   ]);
 }
 
+function setAuthStatus(message = "", type = "") {
+  if (!els.authStatus) return;
+  els.authStatus.textContent = message;
+  els.authStatus.className = `status auth-status${type ? ` ${type}` : ""}`;
+}
+
+function showAuthOverlay() {
+  if (els.authOverlay) els.authOverlay.hidden = false;
+  if (els.appShell) els.appShell.hidden = true;
+}
+
+function showAppShell() {
+  if (els.authOverlay) els.authOverlay.hidden = true;
+  if (els.appShell) els.appShell.hidden = false;
+}
+
+function updateAuthModeUi() {
+  if (els.authSubmitBtn) {
+    els.authSubmitBtn.textContent = authSignUpMode ? "Create account" : "Sign in";
+  }
+  if (els.authToggleMode) {
+    els.authToggleMode.textContent = authSignUpMode
+      ? "Already have an account? Sign in"
+      : "Need an account? Sign up";
+  }
+  if (els.authSubtitle) {
+    els.authSubtitle.textContent = authSignUpMode
+      ? "Create an account to continue"
+      : "Sign in to continue";
+  }
+  if (els.authPassword) {
+    els.authPassword.autocomplete = authSignUpMode ? "new-password" : "current-password";
+    els.authPassword.placeholder = authSignUpMode
+      ? "Create a password (6+ characters)"
+      : "Your password";
+  }
+}
+
+function getUserInitials(email) {
+  const trimmed = String(email || "").trim();
+  if (!trimmed) return "";
+
+  const local = trimmed.split("@")[0] || "";
+  const parts = local.split(/[._-]+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  }
+  return local.slice(0, 2).toUpperCase();
+}
+
+function updateAccountUi() {
+  const email =
+    typeof currentAuthUser?.email === "string" ? currentAuthUser.email : "";
+  if (els.settingsAccountEmail) {
+    els.settingsAccountEmail.textContent = email || "Not signed in";
+  }
+  if (els.userBtn) {
+    const signedIn = Boolean(email);
+    els.userBtn.classList.toggle("is-signed-in", signedIn);
+    els.userBtn.title = signedIn ? email : "Account";
+    els.userBtn.setAttribute("aria-label", signedIn ? `Account: ${email}` : "Account");
+  }
+  if (els.userAvatarInitials) {
+    els.userAvatarInitials.textContent = getUserInitials(email) || "?";
+  }
+}
+
+function setAuthBusy(busy) {
+  authBusy = busy;
+  if (els.authSubmitBtn) {
+    els.authSubmitBtn.disabled = busy;
+    els.authSubmitBtn.classList.toggle("busy", busy);
+  }
+  if (els.authEmail) els.authEmail.disabled = busy;
+  if (els.authPassword) els.authPassword.disabled = busy;
+  if (els.authToggleMode) els.authToggleMode.disabled = busy;
+}
+
+function wireAuthListeners() {
+  els.authForm?.addEventListener("submit", onAuthSubmit);
+  els.authToggleMode?.addEventListener("click", () => {
+    authSignUpMode = !authSignUpMode;
+    setAuthStatus("");
+    updateAuthModeUi();
+  });
+  updateAuthModeUi();
+}
+
+/**
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function requireAuth() {
+  const session = await getSession();
+  if (session?.user) return session.user;
+
+  showAuthOverlay();
+  setAuthStatus("");
+
+  return new Promise((resolve) => {
+    authReadyResolve = resolve;
+  });
+}
+
+async function onAuthSubmit(event) {
+  event.preventDefault();
+  if (authBusy) return;
+
+  const email = els.authEmail?.value.trim() || "";
+  const password = els.authPassword?.value || "";
+  if (!email || !password) {
+    setAuthStatus("Enter your email and password.", "error");
+    return;
+  }
+
+  setAuthBusy(true);
+  setAuthStatus(authSignUpMode ? "Creating account…" : "Signing in…");
+
+  try {
+    const session = authSignUpMode
+      ? await signUp(email, password)
+      : await signIn(email, password);
+    currentAuthUser = session.user;
+    setAuthStatus("");
+    if (els.authPassword) els.authPassword.value = "";
+    authReadyResolve?.(session.user);
+    authReadyResolve = null;
+  } catch (err) {
+    setAuthStatus(err.message || "Authentication failed.", "error");
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+async function onSignOut() {
+  hideSettingsPanel();
+  await signOut();
+  currentAuthUser = null;
+  updateAccountUi();
+  authSignUpMode = false;
+  updateAuthModeUi();
+  if (els.authEmail) els.authEmail.value = "";
+  if (els.authPassword) els.authPassword.value = "";
+  currentAuthUser = await requireAuth();
+  showAppShell();
+  updateAccountUi();
+  await refreshCloudData();
+}
+
 init();
 
-async function init() {
+async function refreshCloudData() {
+  try {
+    await forceRefreshSession();
+    await syncUserDataFromCloud();
+  } catch (err) {
+    console.warn("Failed to sync data from Supabase", err);
+  }
   await loadProfileResume();
+  await renderHistory();
+}
+
+async function init() {
+  wireAuthListeners();
+  currentAuthUser = await requireAuth();
+  showAppShell();
+  updateAccountUi();
+
+  await refreshCloudData();
   appSettings = await loadSettings();
   applySettingsToForm(appSettings);
   updateProviderUi();
@@ -320,8 +517,10 @@ async function init() {
     tab.addEventListener("click", () => setActiveJobsTab(tab.dataset.jobsTab));
   });
   els.settingsBtn.addEventListener("click", showSettingsPanel);
+  els.userBtn?.addEventListener("click", showSettingsPanel);
   els.closeSettingsBtn.addEventListener("click", hideSettingsPanel);
   els.saveSettingsBtn.addEventListener("click", onSaveSettings);
+  els.signOutBtn?.addEventListener("click", onSignOut);
   els.refreshAnalysisBtn.addEventListener("click", renderAnalysis);
   els.exportHistoryBtn.addEventListener("click", onExportHistory);
   els.copyCoverLetterBtn.addEventListener("click", onCopyCoverLetter);
@@ -331,7 +530,6 @@ async function init() {
   initScrollToTop();
 
   updateApplicationActionButton();
-  await renderHistory();
   await maybeShowOnboarding();
 }
 
@@ -1163,6 +1361,7 @@ async function persistProfile() {
     [PROFILE_KEY]: text,
     [PROFILE_STRUCTURED_KEY]: structured,
   });
+  await syncProfileToCloud(text, structured);
 }
 
 async function openHistoryEntry(entry) {

@@ -7,6 +7,32 @@
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
+  <div id="authOverlay" class="auth-overlay" hidden>
+    <div class="auth-card" role="dialog" aria-labelledby="authTitle">
+      <div class="auth-brand">
+        <img src="../icons/logo-mark.svg" alt="" class="brand-mark" width="40" height="40" />
+        <h2 id="authTitle">Welcome to cApply</h2>
+        <p class="auth-subtitle" id="authSubtitle">Sign in to continue</p>
+      </div>
+      <form id="authForm" class="auth-form">
+        <label>
+          Email
+          <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email" required />
+        </label>
+        <label>
+          Password
+          <input type="password" id="authPassword" placeholder="At least 6 characters" autocomplete="current-password" minlength="6" required />
+        </label>
+        <button type="submit" id="authSubmitBtn" class="primary auth-submit-btn">Sign in</button>
+      </form>
+      <div class="auth-footer">
+        <button type="button" id="authToggleMode" class="link-btn auth-toggle-btn">Need an account? Sign up</button>
+        <p id="authStatus" class="status auth-status" role="status" aria-live="polite"></p>
+      </div>
+    </div>
+  </div>
+
+  <div id="appShell" hidden>
   <header>
     <div class="header-top">
       <div class="brand">
@@ -16,12 +42,21 @@
           <p class="subtitle" id="appSubtitle">Tailor your resume with ChatGPT</p>
         </div>
       </div>
-      <button type="button" id="settingsBtn" class="header-settings-btn" aria-label="Settings" title="Settings">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-          <circle cx="12" cy="12" r="3" />
-        </svg>
-      </button>
+      <div class="header-actions">
+        <button type="button" id="userBtn" class="header-user-btn" aria-label="Account" title="Account">
+          <span id="userAvatarInitials" class="header-user-initials" aria-hidden="true">?</span>
+          <svg class="header-user-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
+          </svg>
+        </button>
+        <button type="button" id="settingsBtn" class="header-settings-btn" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </button>
+      </div>
     </div>
     <nav class="main-tabs" role="tablist" aria-label="Main sections">
       <button type="button" class="main-tab active" role="tab" id="tab-application" aria-selected="true" aria-controls="panel-application" data-tab="application">Application</button>
@@ -359,6 +394,13 @@
         <label>Settings</label>
         <button type="button" id="closeSettingsBtn" class="link-btn">Close</button>
       </div>
+      <section class="settings-account-section">
+        <div class="field-header">
+          <label>Account</label>
+        </div>
+        <p id="settingsAccountEmail" class="field-hint settings-account-email">Not signed in</p>
+      </section>
+
       <div class="settings-grid">
         <label>
           LLM provider
@@ -439,6 +481,7 @@
 
       <div class="settings-actions">
         <button type="button" id="saveSettingsBtn" class="primary profile-action-btn">Save settings</button>
+        <button type="button" id="signOutBtn" class="secondary danger profile-action-btn">Sign out</button>
       </div>
       <p id="settingsStatus" class="status" role="status" aria-live="polite"></p>
     </section>
@@ -465,5 +508,6 @@
 
   <script src="../lib/jspdf/jspdf.umd.min.js"></script>
   <script type="module" src="popup.js"></script>
+  </div>
 </body>
 </html>

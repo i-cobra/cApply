@@ -126,6 +126,31 @@ test("parseTailorResponse keeps categorized skills from tailor JSON", () => {
   assert.doesNotMatch(structured.skills, /^• /m);
 });
 
+test("parseTailorResponse scopes resume summary away from atsScore.summary", () => {
+  const resumeSummary =
+    "Full Stack Engineer with 4 years of professional software development experience and GoHighLevel platform development.";
+  const atsSummary =
+    "The tailored resume achieves near-complete keyword alignment with the job description.";
+
+  const json = `{
+    "atsScore": {
+      "score": 95,
+      "summary": "${atsSummary}",
+      "missingKeywords": []
+    },
+    "tailoredResume": {
+      "summary": "${resumeSummary}",
+      "skills": "Languages: JavaScript",
+      "experience": [{ "bullets": ["Built GoHighLevel automations."] }],
+      INVALID
+    }
+  }`;
+
+  const { structured } = parseTailorResponse(json);
+  assert.equal(structured.summary, resumeSummary);
+  assert.doesNotMatch(structured.summary, /keyword alignment/i);
+});
+
 test("ensureTailoredResumeCoverage does not prepend junk into categorized skills", () => {
   const skills = [
     "Languages: JavaScript, TypeScript, Ruby, HTML5, CSS3, SQL",
